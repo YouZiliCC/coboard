@@ -26,7 +26,10 @@ RUN pnpm --filter shared build \
   && pnpm --filter server build
 
 # Prune to production dependencies for the runtime image.
-RUN pnpm install --prod --frozen-lockfile || pnpm install --prod
+# --config.confirm-modules-purge=false: Docker build has no TTY, so pnpm would
+# otherwise abort the node_modules purge (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+RUN pnpm install --prod --frozen-lockfile --config.confirm-modules-purge=false \
+  || pnpm install --prod --config.confirm-modules-purge=false
 
 # --- Stage 2: runtime -----------------------------------------------------
 # Minimal node:22-alpine image with prod deps + built dist only.
