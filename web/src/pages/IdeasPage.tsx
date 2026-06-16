@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, Lightbulb, Plus, Send, X } from 'lucide-react';
+import { Check, Lightbulb, Plus, Send, Trash2, X } from 'lucide-react';
 import type { IdeaStatus, IdeaWithContext } from 'shared';
 import { adoptIdeaInputSchema, createStandaloneIdeaInputSchema, ideaStatuses } from 'shared';
 import {
@@ -29,6 +29,7 @@ import {
   useAdoptIdea,
   useAllIdeas,
   useCreateStandaloneIdea,
+  useDeleteIdea,
   useRejectIdea,
 } from '../api/ideas';
 import { useAuth } from '../lib/auth-context';
@@ -59,7 +60,7 @@ const IDEA_STATUS_VARIANT: Record<IdeaStatus, BadgeVariant> = {
 const ALL_STATUSES = 'all';
 
 export default function IdeasPage(): JSX.Element {
-  const { isAdmin } = useAuth();
+  const { user, isAdmin } = useAuth();
   const [status, setStatus] = useState<IdeaStatus | typeof ALL_STATUSES>(ALL_STATUSES);
   // Clicking a TASK idea opens its task detail drawer in-place (no navigation away).
   const [selected, setSelected] = useState<{ taskId: string; projectId: string } | null>(null);
@@ -128,6 +129,7 @@ export default function IdeasPage(): JSX.Element {
                 key={idea.id}
                 idea={idea}
                 canManage={isAdmin}
+                canDelete={isAdmin || idea.author.id === user?.id}
                 onOpen={
                   idea.taskId != null && idea.projectId != null
                     ? () => setSelected({ taskId: idea.taskId!, projectId: idea.projectId! })
@@ -245,15 +247,39 @@ function PublishIdeaDialog(): JSX.Element {
 function IdeaCard({
   idea,
   canManage,
+  canDelete,
   onOpen,
 }: {
   idea: IdeaWithContext;
   /** Whether the current user (global admin) may adopt/reject a standalone idea. */
   canManage: boolean;
+  /** Whether the current user (global admin / author) may delete this idea. */
+  canDelete: boolean;
   /** Opens the owning task drawer; undefined for a STANDALONE idea (no task). */
   onOpen?: () => void;
 }): JSX.Element {
   const isStandalone = idea.taskId == null;
+  const deleteIdea = useDeleteIdea();
+
+  /** Overlaid 删除 button (top-right); kept out of the clickable task-card button. */
+  const deleteButton = canDelete ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="absolute right-2 top-2 z-10 h-7 w-7 bg-card/80 text-muted-foreground hover:text-destructive"
+      aria-label="删除想法"
+      loading={deleteIdea.isPending}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (window.confirm('确定删除这个想法？')) {
+          deleteIdea.mutate({ ideaId: idea.id, taskId: idea.taskId ?? undefined });
+        }
+      }}
+    >
+      {!deleteIdea.isPending && <Trash2 className="h-3.5 w-3.5" aria-hidden />}
+    </Button>
+  ) : null;
 
   const head = (
     <>
@@ -294,22 +320,27 @@ function IdeaCard({
     </>
   );
 
-  // TASK idea: the whole card is a button that opens the task drawer (current behavior).
+  // TASK idea: the whole card is a button that opens the task drawer (current
+  // behavior). The 删除 control is overlaid OUTSIDE the button (no nested buttons).
   if (!isStandalone && onOpen) {
     return (
-      <button
-        type="button"
-        onClick={onOpen}
-        className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        {head}
-      </button>
+      <div className="relative">
+        {deleteButton}
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex w-full flex-col gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {head}
+        </button>
+      </div>
     );
   }
 
   // STANDALONE idea (no task drawer): a non-clickable card, with inline admin actions.
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-sm">
+    <div className="relative flex flex-col gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-sm">
+      {deleteButton}
       {head}
       {isStandalone && canManage && idea.status === 'pending' && (
         <StandaloneIdeaActions idea={idea} />

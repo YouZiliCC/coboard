@@ -630,4 +630,161 @@ describe('ideas / inspiration', () => {
     expect(rejectRes.statusCode).toBe(200);
     expect((rejectRes.json() as IdeaResponse).idea.status).toBe('rejected');
   });
+
+  // --- Deletion ------------------------------------------------------------
+
+  it('lets a global admin delete ANY idea (someone else\'s standalone + task idea)', async () => {
+    const admin = await makeUser(ctx, { role: 'admin' });
+    const author = await makeUser(ctx);
+    const projectId = await makeProject(ctx, admin.id);
+    await addMember(ctx, projectId, author.id, 'member');
+    const taskId = await makeTask(ctx, projectId, author.id);
+    const authorCookie = await authCookie(ctx, author.id);
+    const adminCookie = await authCookie(ctx, admin.id);
+
+    // A task idea authored by someone other than the admin.
+    const taskIdea = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/ideas`,
+      headers: headers(authorCookie),
+      payload: { body: '任务想法' },
+    });
+    const taskIdeaId = (taskIdea.json() as IdeasResponse).ideas[0]?.id;
+
+    // A standalone idea authored by someone other than the admin.
+    const standalone = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(authorCookie),
+      payload: { body: '独立想法' },
+    });
+    const standaloneId = (standalone.json() as IdeaResponse).idea.id;
+
+    const delTask = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/ideas/${taskIdeaId}`,
+      headers: headers(adminCookie),
+    });
+    expect(delTask.statusCode).toBe(204);
+
+    const delStandalone = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/ideas/${standaloneId}`,
+      headers: headers(adminCookie),
+    });
+    expect(delStandalone.statusCode).toBe(204);
+
+    // Both rows are gone.
+    const remaining = await ctx.db.select().from(ideas);
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('lets the author delete their own idea (task + standalone)', async () => {
+    const author = await makeUser(ctx);
+    const projectId = await makeProject(ctx, author.id);
+    await addMember(ctx, projectId, author.id, 'member');
+    const taskId = await makeTask(ctx, projectId, author.id);
+    const authorCookie = await authCookie(ctx, author.id);
+
+    const taskIdea = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/ideas`,
+      headers: headers(authorCookie),
+      payload: { body: '我的任务想法' },
+    });
+    const taskIdeaId = (taskIdea.json() as IdeasResponse).ideas[0]?.id;
+
+    const standalone = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(authorCookie),
+      payload: { body: '我的独立想法' },
+    });
+    const standaloneId = (standalone.json() as IdeaResponse).idea.id;
+
+    const delTask = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/ideas/${taskIdeaId}`,
+      headers: headers(authorCookie),
+    });
+    expect(delTask.statusCode).toBe(204);
+
+    const delStandalone = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/ideas/${standaloneId}`,
+      headers: headers(authorCookie),
+    });
+    expect(delStandalone.statusCode).toBe(204);
+
+    const remaining = await ctx.db.select().from(ideas);
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('forbids a random member from deleting another member\'s idea (403)', async () => {
+    const author = await makeUser(ctx);
+    const other = await makeUser(ctx);
+    const projectId = await makeProject(ctx, author.id);
+    await addMember(ctx, projectId, author.id, 'member');
+    await addMember(ctx, projectId, other.id, 'member');
+    const taskId = await makeTask(ctx, projectId, author.id);
+    const authorCookie = await authCookie(ctx, author.id);
+    const otherCookie = await authCookie(ctx, other.id);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/ideas`,
+      headers: headers(authorCookie),
+      payload: { body: '不该被他人删除' },
+    });
+    const ideaId = (created.json() as IdeasResponse).ideas[0]?.id;
+
+    const delRes = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/ideas/${ideaId}`,
+      headers: headers(otherCookie),
+    });
+    expect(delRes.statusCode).toBe(403);
+
+    // The idea must remain.
+    const rows = await ctx.db.select().from(ideas).where(eq(ideas.id, ideaId!));
+    expect(rows).toHaveLength(1);
+  });
+
+  it('lets a project lead delete a task idea authored by a member', async () => {
+    const lead = await makeUser(ctx);
+    const member = await makeUser(ctx);
+    const projectId = await makeProject(ctx, lead.id);
+    await addMember(ctx, projectId, lead.id, 'lead');
+    await addMember(ctx, projectId, member.id, 'member');
+    const taskId = await makeTask(ctx, projectId, member.id);
+    const memberCookie = await authCookie(ctx, member.id);
+    const leadCookie = await authCookie(ctx, lead.id);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/ideas`,
+      headers: headers(memberCookie),
+      payload: { body: '会被负责人删除' },
+    });
+    const ideaId = (created.json() as IdeasResponse).ideas[0]?.id;
+
+    const delRes = await ctx.app.inject({
+      method: 'DELETE',
+      url: `/api/ideas/${ideaId}`,
+      headers: headers(leadCookie),
+    });
+    expect(delRes.statusCode).toBe(204);
+  });
+
+  it('returns 404 when deleting a missing idea', async () => {
+    const admin = await makeUser(ctx, { role: 'admin' });
+    const adminCookie = await authCookie(ctx, admin.id);
+
+    const delRes = await ctx.app.inject({
+      method: 'DELETE',
+      url: '/api/ideas/00000000-0000-0000-0000-000000000000',
+      headers: headers(adminCookie),
+    });
+    expect(delRes.statusCode).toBe(404);
+  });
 });

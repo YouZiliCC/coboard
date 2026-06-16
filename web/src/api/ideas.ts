@@ -65,6 +65,7 @@ export const ideasApi = {
     api.post<IdeaResponse>(`/ideas/${ideaId}/adopt`, body).then((r) => r.idea),
   reject: (ideaId: string): Promise<Idea> =>
     api.post<IdeaResponse>(`/ideas/${ideaId}/reject`).then((r) => r.idea),
+  remove: (ideaId: string): Promise<void> => api.delete<void>(`/ideas/${ideaId}`),
 };
 
 // ---------------------------------------------------------------------------
@@ -169,5 +170,24 @@ export function useRejectIdea(): UseMutationResult<Idea, Error, RejectIdeaVars> 
   return useMutation<Idea, Error, RejectIdeaVars>({
     mutationFn: ({ ideaId }) => ideasApi.reject(ideaId),
     onSuccess: (_idea, { taskId }) => invalidateIdeas(queryClient, taskId),
+  });
+}
+
+export interface DeleteIdeaVars {
+  ideaId: string;
+  /** Owning task id, so the task's idea list can be invalidated. */
+  taskId?: string;
+}
+
+/**
+ * Delete an idea (§7.1 DELETE /ideas/:id; global admin / author / task project
+ * lead). Invalidates the task's ideas + the cross-project 灵感区 listing + stats
+ * (deleting an adopted idea removes its reward points from the author's total).
+ */
+export function useDeleteIdea(): UseMutationResult<void, Error, DeleteIdeaVars> {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, DeleteIdeaVars>({
+    mutationFn: ({ ideaId }) => ideasApi.remove(ideaId),
+    onSuccess: (_void, { taskId }) => invalidateIdeas(queryClient, taskId),
   });
 }

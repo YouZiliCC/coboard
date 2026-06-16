@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, Lightbulb, Send, X } from 'lucide-react';
+import { Check, Lightbulb, Send, Trash2, X } from 'lucide-react';
 import type { Idea, IdeaStatus, Task } from 'shared';
 import { adoptIdeaInputSchema, createIdeaInputSchema } from 'shared';
 import {
@@ -13,7 +13,13 @@ import {
 } from '../../components/ui';
 import { avatarUrl } from '../../lib/utils';
 import { isApiClientError } from '../../api/client';
-import { useAdoptIdea, useCreateIdea, useRejectIdea, useTaskIdeas } from '../../api/ideas';
+import {
+  useAdoptIdea,
+  useCreateIdea,
+  useDeleteIdea,
+  useRejectIdea,
+  useTaskIdeas,
+} from '../../api/ideas';
 import { relativeTime } from '../board/format';
 import type { TaskPermissionContext } from '../board/permissions';
 import { isManager } from '../board/permissions';
@@ -47,7 +53,10 @@ export interface IdeaSectionProps {
 export function IdeaSection({ task, permCtx }: IdeaSectionProps): JSX.Element {
   const taskId = task.id;
   const { data: ideas, isLoading } = useTaskIdeas(taskId);
+  // Manager (admin / project lead, or pool-task creator) may adopt/reject + delete
+  // any idea on this task; the author may delete their own (matches the server rule).
   const manager = isManager(permCtx, task);
+  const myId = permCtx.user?.id;
 
   return (
     <div className="flex flex-col gap-4">
@@ -62,7 +71,12 @@ export function IdeaSection({ task, permCtx }: IdeaSectionProps): JSX.Element {
       ) : (
         <ul className="flex flex-col gap-4">
           {ideas.map((idea) => (
-            <IdeaItem key={idea.id} idea={idea} canManage={manager} />
+            <IdeaItem
+              key={idea.id}
+              idea={idea}
+              canManage={manager}
+              canDelete={manager || idea.author.id === myId}
+            />
           ))}
         </ul>
       )}
@@ -71,13 +85,22 @@ export function IdeaSection({ task, permCtx }: IdeaSectionProps): JSX.Element {
   );
 }
 
-function IdeaItem({ idea, canManage }: { idea: Idea; canManage: boolean }): JSX.Element {
+function IdeaItem({
+  idea,
+  canManage,
+  canDelete,
+}: {
+  idea: Idea;
+  canManage: boolean;
+  canDelete: boolean;
+}): JSX.Element {
   const [adopting, setAdopting] = useState(false);
   const [reward, setReward] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const adoptIdea = useAdoptIdea();
   const rejectIdea = useRejectIdea();
+  const deleteIdea = useDeleteIdea();
 
   function submitAdopt(): void {
     setError(null);
@@ -120,6 +143,23 @@ function IdeaItem({ idea, canManage }: { idea: Idea; canManage: boolean }): JSX.
           </Badge>
           {idea.status === 'adopted' && idea.rewardPoints != null && (
             <Badge variant="primary">奖励 {idea.rewardPoints} 点</Badge>
+          )}
+          {canDelete && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="ml-auto h-7 w-7 text-muted-foreground hover:text-destructive"
+              aria-label="删除想法"
+              loading={deleteIdea.isPending}
+              onClick={() => {
+                if (window.confirm('确定删除这个想法？')) {
+                  deleteIdea.mutate({ ideaId: idea.id, taskId: idea.taskId ?? undefined });
+                }
+              }}
+            >
+              {!deleteIdea.isPending && <Trash2 className="h-3.5 w-3.5" aria-hidden />}
+            </Button>
           )}
         </div>
 

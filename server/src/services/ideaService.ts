@@ -300,6 +300,22 @@ export async function rejectIdea(
   return toIdea(updated, author);
 }
 
+/**
+ * Hard-delete an idea (§7.1). Authorization (global admin / author / project lead)
+ * is enforced by the route. Publishes the same `idea` + `task` events as
+ * adopt/reject so the 灵感区 list and contribution stats refresh — deleting an
+ * adopted idea removes its reward points from the author's total.
+ */
+export async function deleteIdea(
+  db: Database,
+  idea: IdeaRow,
+  projectId: string | null,
+  realtimeBus: RealtimeBus = bus,
+): Promise<void> {
+  await db.delete(ideas).where(eq(ideas.id, idea.id));
+  publishIdeaChange(realtimeBus, 'idea_deleted', idea, projectId);
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

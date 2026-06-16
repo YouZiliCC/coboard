@@ -19,6 +19,7 @@ import {
   adoptIdea,
   createIdea,
   createStandaloneIdea,
+  deleteIdea,
   listTaskIdeas,
   listVisibleIdeas,
   loadIdeaOrThrow,
@@ -37,6 +38,8 @@ import type { Database } from '../db/index.js';
  * - POST   /ideas/:id/adopt   adopt + reward (task idea: project lead / global admin;
  *                             standalone idea: global admin only)
  * - POST   /ideas/:id/reject  reject (same permission rule as adopt)
+ * - DELETE /ideas/:id         delete (global admin / the idea's author / — for a
+ *                             task idea — the task's project lead)
  *
  * Membership / lead gating uses the shared guards; data access + realtime fan-out
  * live in ideaService. The per-task endpoints resolve the owning project from the
@@ -86,6 +89,40 @@ async function authorizeIdeaReview(
   const { user, isLead } = await requireTaskVisibility(db, request, task);
   if (!isLead) {
     throw forbidden('需要项目负责人权限');
+  }
+  return { user, projectId: task.projectId };
+}
+
+/**
+ * Resolve who the caller is relative to an idea being DELETED, enforcing the
+ * (broader-than-review) delete permission and returning the owning project id for
+ * the realtime fan-out. Deletion is allowed for:
+ * - the idea's AUTHOR (own idea, task or standalone),
+ * - a GLOBAL ADMIN (any idea), or
+ * - for a TASK idea, the task's PROJECT LEAD (lead-equivalent for pool tasks).
+ *
+ * Throws 403 otherwise. A STANDALONE idea has no project → admin or author only.
+ */
+async function authorizeIdeaDelete(
+  db: Database,
+  request: FastifyRequest,
+  idea: IdeaRow,
+): Promise<{ user: UserRow; projectId: string | null }> {
+  if (idea.taskId === null) {
+    const user = requireAuth(request);
+    if (user.role !== 'admin' && idea.authorId !== user.id) {
+      throw forbidden('只能删除自己发布的想法');
+    }
+    return { user, projectId: null };
+  }
+
+  const task = await loadTaskOrThrow(db, idea.taskId);
+  // Visibility is enforced here; `isLead` carries the lead-equivalent manage flag
+  // (project lead / global admin, or the pool-task creator / admin, §8).
+  const { user, isLead } = await requireTaskVisibility(db, request, task);
+  const isAuthor = idea.authorId === user.id;
+  if (!isAuthor && !isLead) {
+    throw forbidden('只能删除自己发布的想法');
   }
   return { user, projectId: task.projectId };
 }
@@ -176,6 +213,18 @@ const ideasRoutes: FastifyPluginAsync = async (fastify) => {
 
     const rejected = await rejectIdea(db, idea, projectId, user.id, bus);
     return { idea: rejected };
+  });
+
+  // --- DELETE /ideas/:id ---------------------------------------------------
+  // Global admin / the idea's author / (task idea) the task's project lead.
+  fastify.delete('/ideas/:id', async (request, reply) => {
+    const { id } = parseParams(idParamSchema, request.params);
+
+    const idea = await loadIdeaOrThrow(db, id);
+    const { projectId } = await authorizeIdeaDelete(db, request, idea);
+
+    await deleteIdea(db, idea, projectId, bus);
+    return reply.code(204).send();
   });
 };
 
