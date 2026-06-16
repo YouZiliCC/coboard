@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import type {
   LeaderboardEntry,
   MyStatsResponse,
@@ -10,20 +10,22 @@ import type {
 import type { Database } from '../db/index.js';
 import {
   projectMembers,
+  taskClaimants,
   tasks,
   users,
   type UserRow,
 } from '../db/schema.js';
 
 /**
- * Contribution-statistics service (§6.4 / §7). All metrics are computed live from
- * `tasks` — there is no pre-aggregation table. Attribution uses `completed_by`
- * (locked at completion time, so a later re-assignment never rewrites history) and
- * the time window filters on `completed_at`. Both columns are indexed (§5).
+ * Contribution-statistics service (§6.4 / §7; lifecycle v2 §4). Metrics are
+ * computed live by joining `task_claimants` to `tasks WHERE status='done'` — there
+ * is no pre-aggregation table. Each claimant earns +1 completed and their locked
+ * points share (claimant.points, NULL→0). The time window filters on the task's
+ * `completed_at` (locked at approval; attribution is therefore stable).
  *
- * Metric definitions (§6.4):
- * - count  = number of `done` tasks (each task counts as exactly 1).
- * - points = SUM(points) treating a NULL `points` as 0.
+ * Metric definitions (§4):
+ * - count  = number of done tasks the user claimed (each counts as exactly 1).
+ * - points = SUM(task_claimants.points) treating a NULL share as 0.
  *
  * Routes call these after the auth/membership guards have run; the service itself
  * only encodes the visibility scope it is handed (a concrete project id or the set
@@ -87,18 +89,19 @@ export async function resolveVisibleScope(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the WHERE predicate shared by every contribution aggregate: only `done`
- * tasks with a non-null `completed_by`, narrowed by the time window and the
- * visibility scope. Returns `undefined` when the scope can never match (empty
- * project set) so callers can short-circuit to an empty result.
+ * Build the WHERE predicate shared by every contribution aggregate (lifecycle v2
+ * §4): only `done` tasks, narrowed by the time window and the visibility scope, and
+ * optionally to a single claimant. Designed for a query that joins `task_claimants`
+ * to `tasks`. Returns `'never'` when the scope can never match (empty project set)
+ * so callers can short-circuit to an empty result.
  */
 function buildBaseFilters(args: {
   scope: StatsScope;
   from?: Date;
   to?: Date;
-  completedBy?: string;
+  userId?: string;
 }): ReturnType<typeof and> | undefined | 'never' {
-  const conditions = [eq(tasks.status, 'done'), isNotNull(tasks.completedBy)];
+  const conditions = [eq(tasks.status, 'done')];
 
   switch (args.scope.kind) {
     case 'project':
@@ -112,8 +115,8 @@ function buildBaseFilters(args: {
       break;
   }
 
-  if (args.completedBy) {
-    conditions.push(eq(tasks.completedBy, args.completedBy));
+  if (args.userId) {
+    conditions.push(eq(taskClaimants.userId, args.userId));
   }
   if (args.from) {
     conditions.push(gte(tasks.completedAt, args.from));
@@ -125,9 +128,9 @@ function buildBaseFilters(args: {
   return and(...conditions);
 }
 
-/** SUM(points) with NULL treated as 0, materialized as a JS integer. */
-const pointsSumSql = sql<number>`coalesce(sum(coalesce(${tasks.points}, 0)), 0)::int`;
-/** COUNT(*) of done tasks, materialized as a JS integer. */
+/** SUM(claimant points share) with NULL treated as 0, as a JS integer (§4). */
+const pointsSumSql = sql<number>`coalesce(sum(coalesce(${taskClaimants.points}, 0)), 0)::int`;
+/** COUNT(*) of (claimant, done task) rows — each claimant earns +1 (§4). */
 const completedCountSql = sql<number>`count(*)::int`;
 
 // ---------------------------------------------------------------------------
@@ -142,9 +145,9 @@ export interface LeaderboardArgs {
 }
 
 /**
- * Per-user completed-count + points-sum, ranked. Attribution is by `completed_by`.
- * Sorting: by the chosen metric descending, then the other metric descending, then
- * `display_name` ascending so the order is fully deterministic across calls.
+ * Per-user completed-count + points-sum, ranked. Attribution is by claimants of
+ * done tasks (§4). Sorting: by the chosen metric descending, then the other metric
+ * descending, then `display_name` ascending so the order is fully deterministic.
  */
 export async function getLeaderboard(
   db: Database,
@@ -163,8 +166,9 @@ export async function getLeaderboard(
       completedCount: completedCountSql,
       pointsSum: pointsSumSql,
     })
-    .from(tasks)
-    .innerJoin(users, eq(users.id, tasks.completedBy))
+    .from(taskClaimants)
+    .innerJoin(tasks, eq(tasks.id, taskClaimants.taskId))
+    .innerJoin(users, eq(users.id, taskClaimants.userId))
     .where(where)
     .groupBy(users.id);
 
@@ -216,7 +220,7 @@ export async function getMyStats(
     scope: { kind: 'all' },
     from: args.from,
     to: args.to,
-    completedBy: args.userId,
+    userId: args.userId,
   });
   if (where === 'never') return { completedCount: 0, pointsSum: 0 };
 
@@ -225,7 +229,8 @@ export async function getMyStats(
       completedCount: completedCountSql,
       pointsSum: pointsSumSql,
     })
-    .from(tasks)
+    .from(taskClaimants)
+    .innerJoin(tasks, eq(tasks.id, taskClaimants.taskId))
     .where(where);
 
   const row = rows[0];
@@ -261,7 +266,7 @@ export async function getTrend(
     scope: args.scope,
     from: args.from,
     to: args.to,
-    completedBy: args.userId,
+    userId: args.userId,
   });
   if (where === 'never') return [];
 
@@ -278,7 +283,8 @@ export async function getTrend(
       completedCount: completedCountSql,
       pointsSum: pointsSumSql,
     })
-    .from(tasks)
+    .from(taskClaimants)
+    .innerJoin(tasks, eq(tasks.id, taskClaimants.taskId))
     .where(where)
     .groupBy(bucketDate)
     .orderBy(bucketDate);

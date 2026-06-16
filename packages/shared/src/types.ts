@@ -50,11 +50,17 @@ export type {
   ProjectMembersResponse,
   AddProjectMemberInput,
   // tasks
+  TaskClaimant,
   BoardResponse,
   TaskResponse,
   CreateTaskInput,
   UpdateTaskInput,
   AssignTaskInput,
+  ReleaseTaskInput,
+  DeliverAllocation,
+  DeliverTaskInput,
+  ReviewDecision,
+  ReviewTaskInput,
   // comments & activities
   CommentsResponse,
   CreateCommentInput,

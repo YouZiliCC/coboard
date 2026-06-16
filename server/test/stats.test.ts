@@ -10,6 +10,7 @@ import {
   projectMembers,
   projects,
   sessions,
+  taskClaimants,
   tasks,
   users,
   type NewTaskRow,
@@ -18,11 +19,13 @@ import type { TestContext } from './helpers.js';
 import { createTestContext } from './helpers.js';
 
 /**
- * Contribution-statistics tests (§6.4 / §10). Seeds completed tasks across several
- * users, dates, and point values, then asserts:
- * - leaderboard ranking + count-vs-points sort switching,
+ * Contribution-statistics tests (§6.4 / §10; lifecycle v2 §4). Seeds completed
+ * tasks with their `task_claimants` shares across several users, dates, and point
+ * values, then asserts:
+ * - leaderboard ranking + count-vs-points sort switching (per-claimant attribution),
  * - time-range (`completed_at`) filtering,
- * - attribution stability after a later re-assignment (`completed_by` is locked),
+ * - attribution stability — the claimant share is locked, independent of the
+ *   deprecated single-assignee column,
  * - per-user trend buckets,
  * - project-scoped vs all-visible aggregation + membership authorization.
  */
@@ -102,7 +105,12 @@ async function addMember(projectId: string, userId: string): Promise<void> {
     .values({ projectId, userId, role: 'member' });
 }
 
-/** Insert a completed (done) task attributed to `completedBy` at `completedAt`. */
+/**
+ * Insert a completed (done) task and attribute it to `claimedBy` via a
+ * `task_claimants` row carrying the locked points share (lifecycle v2 §4 — the
+ * stats source is `task_claimants ⋈ tasks WHERE status='done'`). `points` is the
+ * claimant's share; null counts as 0 points but still +1 to the completed count.
+ */
 async function seedDoneTask(opts: {
   projectId: string;
   createdBy: string;
@@ -114,20 +122,25 @@ async function seedDoneTask(opts: {
     projectId: opts.projectId,
     title: 'done task',
     status: 'done',
-    assigneeId: opts.completedBy,
     points: opts.points ?? null,
     createdBy: opts.createdBy,
     rank: nextRank(),
     completedAt: opts.completedAt,
-    completedBy: opts.completedBy,
   };
   const [row] = await ctx.db.insert(tasks).values(values).returning();
   if (!row) throw new Error('seedDoneTask: insert returned no row');
+  await ctx.db.insert(taskClaimants).values({
+    taskId: row.id,
+    userId: opts.completedBy,
+    points: opts.points ?? null,
+    claimedAt: opts.completedAt,
+  });
   return row.id;
 }
 
 /** Truncate all task/project/membership/user rows between tests. */
 async function reset(): Promise<void> {
+  await ctx.db.delete(taskClaimants);
   await ctx.db.delete(tasks);
   await ctx.db.delete(projectMembers);
   await ctx.db.delete(projects);
@@ -218,7 +231,7 @@ describe('GET /api/stats/leaderboard', () => {
     expect(res.body.entries[0]).toMatchObject({ completedCount: 1, pointsSum: 1 });
   });
 
-  it('keeps attribution stable after the task is re-assigned', async () => {
+  it('keeps attribution stable — locked to the claimant, not the deprecated assignee', async () => {
     const admin = await seedUser({ email: 'admin@x.com', displayName: 'Admin', role: 'admin' });
     const eve = await seedUser({ email: 'eve@x.com', displayName: 'Eve' });
     const frank = await seedUser({ email: 'frank@x.com', displayName: 'Frank' });
@@ -228,12 +241,13 @@ describe('GET /api/stats/leaderboard', () => {
     const taskId = await seedDoneTask({
       projectId,
       createdBy: admin.id,
-      completedBy: eve.id, // locked attribution
+      completedBy: eve.id, // claimant share is the locked attribution
       completedAt: at,
       points: 7,
     });
 
-    // Re-assign the (already completed) task to Frank — must NOT move the credit.
+    // Mutating the deprecated single-assignee column must NOT move the credit:
+    // contribution is attributed via task_claimants (v2 §4).
     await ctx.db.update(tasks).set({ assigneeId: frank.id }).where(eq(tasks.id, taskId));
 
     const res = await getJson<LeaderboardResponse>(
@@ -243,6 +257,42 @@ describe('GET /api/stats/leaderboard', () => {
     expect(res.body.entries).toHaveLength(1);
     expect(res.body.entries[0]?.user.displayName).toBe('Eve');
     expect(res.body.entries[0]).toMatchObject({ completedCount: 1, pointsSum: 7 });
+  });
+
+  it('credits every claimant of a shared done task with its own share', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', displayName: 'Admin', role: 'admin' });
+    const nora = await seedUser({ email: 'nora@x.com', displayName: 'Nora' });
+    const omar = await seedUser({ email: 'omar@x.com', displayName: 'Omar' });
+    const projectId = await seedProject({ name: 'P', key: 'P1', createdBy: admin.id });
+
+    const at = new Date('2026-06-08T10:00:00.000Z');
+    const [task] = await ctx.db
+      .insert(tasks)
+      .values({
+        projectId,
+        title: 'shared done task',
+        status: 'done',
+        points: 10,
+        createdBy: admin.id,
+        rank: nextRank(),
+        completedAt: at,
+      })
+      .returning();
+    if (!task) throw new Error('insert returned no row');
+    // Two claimants split the 10 points 6/4 (locked at deliver).
+    await ctx.db.insert(taskClaimants).values([
+      { taskId: task.id, userId: nora.id, points: 6, claimedAt: at },
+      { taskId: task.id, userId: omar.id, points: 4, claimedAt: at },
+    ]);
+
+    const res = await getJson<LeaderboardResponse>(
+      `/api/stats/leaderboard?projectId=${projectId}&sort=points`,
+      admin.cookie,
+    );
+    // Each claimant earns +1 completed and their own share.
+    expect(res.body.entries.map((e) => e.user.displayName)).toEqual(['Nora', 'Omar']);
+    expect(res.body.entries[0]).toMatchObject({ completedCount: 1, pointsSum: 6 });
+    expect(res.body.entries[1]).toMatchObject({ completedCount: 1, pointsSum: 4 });
   });
 
   it('aggregates across all visible projects when no projectId is given', async () => {

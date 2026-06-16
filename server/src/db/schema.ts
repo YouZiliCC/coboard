@@ -7,6 +7,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -165,6 +166,9 @@ export const tasks = pgTable(
     title: text('title').notNull(),
     description: text('description'),
     status: taskStatusEnum('status').notNull().default('open'),
+    // DEPRECATED (lifecycle v2 §2.2): single-assignee model replaced by the
+    // `task_claimants` set. Column kept (not dropped) to de-risk the migration;
+    // no code reads/writes it going forward.
     assigneeId: uuid('assignee_id').references(() => users.id, {
       onDelete: 'set null',
     }),
@@ -177,7 +181,18 @@ export const tasks = pgTable(
     // lexicographic ordering key used for intra-column drag ordering.
     rank: text('rank').notNull(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    // DEPRECATED (lifecycle v2 §2.2): contribution attribution now lives on
+    // `task_claimants`. Kept for migration safety; unused by the code.
     completedBy: uuid('completed_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    // Lifecycle v2 (§2/§3): set on deliver, cleared on reject.
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    deliveredBy: uuid('delivered_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    // Set by the reviewer on approve/reject (§3).
+    reviewedBy: uuid('reviewed_by').references(() => users.id, {
       onDelete: 'set null',
     }),
     createdAt,
@@ -186,6 +201,33 @@ export const tasks = pgTable(
     index('tasks_project_status_idx').on(table.projectId, table.status),
     index('tasks_assignee_idx').on(table.assigneeId),
     index('tasks_completed_at_idx').on(table.completedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// task_claimants (lifecycle v2 §2) — the set of users who have claimed a task.
+// Replaces the single-assignee model. `points` is the per-claimant share written
+// at deliver time (NULL until then / after a reject). PK is (task_id, user_id).
+// ---------------------------------------------------------------------------
+
+export const taskClaimants = pgTable(
+  'task_claimants',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // Per-claimant points share; null until delivered, cleared again on reject.
+    points: integer('points'),
+    claimedAt: timestamp('claimed_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.userId] }),
+    index('task_claimants_user_id_idx').on(table.userId),
   ],
 );
 
@@ -272,6 +314,8 @@ export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type NewProjectMemberRow = typeof projectMembers.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
 export type NewTaskRow = typeof tasks.$inferInsert;
+export type TaskClaimantRow = typeof taskClaimants.$inferSelect;
+export type NewTaskClaimantRow = typeof taskClaimants.$inferInsert;
 export type CommentRow = typeof comments.$inferSelect;
 export type NewCommentRow = typeof comments.$inferInsert;
 export type ActivityRow = typeof activities.$inferSelect;
@@ -287,6 +331,7 @@ export const schema = {
   projects,
   projectMembers,
   tasks,
+  taskClaimants,
   comments,
   activities,
   settings,

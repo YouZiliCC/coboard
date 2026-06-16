@@ -27,15 +27,21 @@ export function isManager(ctx: TaskPermissionContext): boolean {
   return ctx.user?.role === 'admin' || ctx.projectRole === 'lead';
 }
 
+/** Is the current user among the task's claimants (lifecycle v2 §2)? */
+export function isClaimant(ctx: TaskPermissionContext, task: Task): boolean {
+  if (!ctx.user) return false;
+  return task.claimants.some((c) => c.userId === ctx.user!.id);
+}
+
 /**
- * Can the user edit a task's fields / move it on the board (§6.3)?
+ * Can the user edit a task's fields / move it on the board (§6.3, v2)?
  * - admin / lead: any task in the project.
- * - member: tasks they created or are assigned to.
+ * - member: tasks they created or have claimed.
  */
 export function canEditTask(ctx: TaskPermissionContext, task: Task): boolean {
   if (!ctx.user) return false;
   if (isManager(ctx)) return true;
-  return task.createdBy === ctx.user.id || task.assigneeId === ctx.user.id;
+  return task.createdBy === ctx.user.id || isClaimant(ctx, task);
 }
 
 /** Can the user delete a task? admin / lead, or the creator (§6.3). */
@@ -50,13 +56,37 @@ export function canAssign(ctx: TaskPermissionContext): boolean {
   return isManager(ctx);
 }
 
-/** Can the user release this task? the assignee themselves, or admin / lead (§6.2). */
+/**
+ * Can the user release (themselves from) this task? a claimant, or a manager when
+ * there is at least one claimant to remove (lifecycle v2 §3).
+ */
 export function canRelease(ctx: TaskPermissionContext, task: Task): boolean {
-  if (!ctx.user || !task.assigneeId) return false;
-  return task.assigneeId === ctx.user.id || isManager(ctx);
+  if (!ctx.user) return false;
+  if (isClaimant(ctx, task)) return true;
+  return isManager(ctx) && task.claimants.length > 0;
 }
 
-/** Can the user claim this task? any member, when it's open + unassigned (§6.2). */
+/**
+ * Can the user claim this task? any member, when it's open / in_progress and they
+ * are not already a claimant (lifecycle v2 §3).
+ */
 export function canClaim(ctx: TaskPermissionContext, task: Task): boolean {
-  return !!ctx.user && task.status === 'open' && task.assigneeId === null;
+  if (!ctx.user) return false;
+  if (task.status !== 'open' && task.status !== 'in_progress') return false;
+  return !isClaimant(ctx, task);
+}
+
+/**
+ * Can the user deliver this task (open the points-split dialog)? a claimant or a
+ * manager, while the task is in_progress (lifecycle v2 §3).
+ */
+export function canDeliver(ctx: TaskPermissionContext, task: Task): boolean {
+  if (!ctx.user || task.status !== 'in_progress') return false;
+  if (task.claimants.length === 0) return false;
+  return isClaimant(ctx, task) || isManager(ctx);
+}
+
+/** Can the user review this task? manager only, while pending_review (v2 §3). */
+export function canReview(ctx: TaskPermissionContext, task: Task): boolean {
+  return task.status === 'pending_review' && isManager(ctx);
 }

@@ -9,9 +9,12 @@ import type {
   AssignTaskInput,
   BoardResponse,
   CreateTaskInput,
+  DeliverTaskInput,
   ProjectMembersResponse,
   ProjectMemberWithUser,
+  ReviewTaskInput,
   Task,
+  TaskClaimant,
   TaskResponse,
   UpdateTaskInput,
 } from 'shared';
@@ -46,10 +49,17 @@ export const tasksApi = {
     api.patch<TaskResponse>(`/tasks/${taskId}`, body),
   claim: (taskId: string): Promise<TaskResponse> =>
     api.post<TaskResponse>(`/tasks/${taskId}/claim`),
-  release: (taskId: string): Promise<TaskResponse> =>
-    api.post<TaskResponse>(`/tasks/${taskId}/release`),
+  release: (taskId: string, userId?: string): Promise<TaskResponse> =>
+    api.post<TaskResponse>(
+      `/tasks/${taskId}/release`,
+      userId ? { userId } : undefined,
+    ),
   assign: (taskId: string, body: AssignTaskInput): Promise<TaskResponse> =>
     api.post<TaskResponse>(`/tasks/${taskId}/assign`, body),
+  deliver: (taskId: string, body: DeliverTaskInput): Promise<TaskResponse> =>
+    api.post<TaskResponse>(`/tasks/${taskId}/deliver`, body),
+  review: (taskId: string, body: ReviewTaskInput): Promise<TaskResponse> =>
+    api.post<TaskResponse>(`/tasks/${taskId}/review`, body),
   remove: (taskId: string): Promise<void> => api.delete<void>(`/tasks/${taskId}`),
   members: (projectId: string, signal?: AbortSignal): Promise<ProjectMembersResponse> =>
     api.get<ProjectMembersResponse>(`/projects/${projectId}/members`, { signal }),
@@ -192,17 +202,12 @@ export interface PatchTaskVars {
 }
 
 /**
- * Patch a task's fields / status / rank (§7 PATCH /tasks/:id) with an optimistic
- * update. Used for inline edits AND for drag-to-reorder/move on the board.
- *
- * `completedAt`/`completedBy` are server-derived on a status transition to/from
- * `done`; we mirror the expected effect locally so the card updates immediately,
- * then reconcile via invalidation.
+ * Patch a task's fields / rank, plus the direct open↔in_progress board moves
+ * (§7 PATCH /tasks/:id, lifecycle v2 §3) with an optimistic update. Deliver/review
+ * own the pending_review/done transitions, so this never touches completion state.
  */
 export function usePatchTask(
   projectId: string,
-  /** Optional current user id, used to predict `completed_by` on completion. */
-  currentUserId?: string,
 ): UseMutationResult<TaskResponse, Error, PatchTaskVars, BoardSnapshot> {
   const queryClient = useQueryClient();
   return useMutation<TaskResponse, Error, PatchTaskVars, BoardSnapshot>({
@@ -210,16 +215,96 @@ export function usePatchTask(
     onMutate: async ({ taskId, patch }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
       await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
+      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
+        ...task,
+        ...patch,
+      }));
+    },
+    onError: (_err, { taskId }, context) => {
+      restoreSnapshot(queryClient, projectId, taskId, context);
+    },
+    onSettled: (_data, _err, { taskId }) => {
+      invalidateTask(queryClient, projectId, taskId);
+    },
+  });
+}
+
+/** Optimistically add a claimant (the current user) to a task's claimant list. */
+function addClaimant(task: Task, claimant: TaskClaimant): TaskClaimant[] {
+  if (task.claimants.some((c) => c.userId === claimant.userId)) return task.claimants;
+  return [...task.claimants, claimant];
+}
+
+/**
+ * Claim a task (lifecycle v2 §3). Optimistically adds the current user to the
+ * claimants set and, if the task was open, moves it to in_progress.
+ */
+export function useClaimTask(
+  projectId: string,
+  currentUser?: { id: string; displayName: string; avatarColor: string; hasAvatar: boolean },
+): UseMutationResult<TaskResponse, Error, string, BoardSnapshot> {
+  const queryClient = useQueryClient();
+  return useMutation<TaskResponse, Error, string, BoardSnapshot>({
+    mutationFn: (taskId) => tasksApi.claim(taskId),
+    onMutate: async (taskId) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
+      await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
+      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
+        ...task,
+        status: task.status === 'open' ? 'in_progress' : task.status,
+        claimants: currentUser
+          ? addClaimant(task, {
+              userId: currentUser.id,
+              displayName: currentUser.displayName,
+              avatarColor: currentUser.avatarColor,
+              hasAvatar: currentUser.hasAvatar,
+              points: null,
+              claimedAt: new Date().toISOString(),
+            })
+          : task.claimants,
+      }));
+    },
+    onError: (_err, taskId, context) => {
+      restoreSnapshot(queryClient, projectId, taskId, context);
+    },
+    onSettled: (_data, _err, taskId) => {
+      invalidateTask(queryClient, projectId, taskId);
+    },
+  });
+}
+
+/** Variables for release: task id + optional target (defaults to self). */
+export interface ReleaseTaskVars {
+  taskId: string;
+  /** The claimant to remove; omitted means the current user releases themselves. */
+  userId?: string;
+}
+
+/**
+ * Release a claimant from a task (lifecycle v2 §3). Optimistically removes the
+ * target from the claimants set; when none remain the task drops back to open.
+ */
+export function useReleaseTask(
+  projectId: string,
+  currentUserId?: string,
+): UseMutationResult<TaskResponse, Error, ReleaseTaskVars, BoardSnapshot> {
+  const queryClient = useQueryClient();
+  return useMutation<TaskResponse, Error, ReleaseTaskVars, BoardSnapshot>({
+    mutationFn: ({ taskId, userId }) =>
+      tasksApi.release(taskId, userId),
+    onMutate: async ({ taskId, userId }) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
+      await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
+      const target = userId ?? currentUserId;
       return applyOptimisticTask(queryClient, projectId, taskId, (task) => {
-        const next: Task = { ...task, ...patch };
-        if (patch.status === 'done' && task.status !== 'done') {
-          next.completedAt = new Date().toISOString();
-          next.completedBy = task.assigneeId ?? currentUserId ?? null;
-        } else if (patch.status && patch.status !== 'done' && task.status === 'done') {
-          next.completedAt = null;
-          next.completedBy = null;
-        }
-        return next;
+        const claimants = target
+          ? task.claimants.filter((c) => c.userId !== target)
+          : task.claimants;
+        return {
+          ...task,
+          claimants,
+          status: claimants.length === 0 ? 'open' : task.status,
+        };
       });
     },
     onError: (_err, { taskId }, context) => {
@@ -231,71 +316,17 @@ export function usePatchTask(
   });
 }
 
-/**
- * Claim an unassigned open task (§6.2). Optimistically assigns to the current
- * user and moves to in_progress; a lost race (409) rolls back.
- */
-export function useClaimTask(
-  projectId: string,
-  currentUserId: string,
-): UseMutationResult<TaskResponse, Error, string, BoardSnapshot> {
-  const queryClient = useQueryClient();
-  return useMutation<TaskResponse, Error, string, BoardSnapshot>({
-    mutationFn: (taskId) => tasksApi.claim(taskId),
-    onMutate: async (taskId) => {
-      await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
-      await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
-      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
-        ...task,
-        assigneeId: currentUserId,
-        status: 'in_progress',
-      }));
-    },
-    onError: (_err, taskId, context) => {
-      restoreSnapshot(queryClient, projectId, taskId, context);
-    },
-    onSettled: (_data, _err, taskId) => {
-      invalidateTask(queryClient, projectId, taskId);
-    },
-  });
-}
-
-/**
- * Release a task back to the open column (§6.2): clear assignee, status → open.
- */
-export function useReleaseTask(
-  projectId: string,
-): UseMutationResult<TaskResponse, Error, string, BoardSnapshot> {
-  const queryClient = useQueryClient();
-  return useMutation<TaskResponse, Error, string, BoardSnapshot>({
-    mutationFn: (taskId) => tasksApi.release(taskId),
-    onMutate: async (taskId) => {
-      await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
-      await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
-      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
-        ...task,
-        assigneeId: null,
-        status: 'open',
-      }));
-    },
-    onError: (_err, taskId, context) => {
-      restoreSnapshot(queryClient, projectId, taskId, context);
-    },
-    onSettled: (_data, _err, taskId) => {
-      invalidateTask(queryClient, projectId, taskId);
-    },
-  });
-}
-
 /** Variables for assign: task id + assignee. */
 export interface AssignTaskVars {
   taskId: string;
   assigneeId: string;
+  /** Optional display fields for an optimistic claimant avatar. */
+  assignee?: { displayName: string; avatarColor: string; hasAvatar: boolean };
 }
 
 /**
- * Dispatch a task to a member (§6.2, lead/admin only — enforced server-side).
- * Open tasks move to in_progress on assignment.
+ * Dispatch a task to a member (lifecycle v2 §3, lead/admin only — enforced
+ * server-side). Adds the user to the claimants set; open tasks move to in_progress.
  */
 export function useAssignTask(
   projectId: string,
@@ -303,18 +334,73 @@ export function useAssignTask(
   const queryClient = useQueryClient();
   return useMutation<TaskResponse, Error, AssignTaskVars, BoardSnapshot>({
     mutationFn: ({ taskId, assigneeId }) => tasksApi.assign(taskId, { assigneeId }),
-    onMutate: async ({ taskId, assigneeId }) => {
+    onMutate: async ({ taskId, assigneeId, assignee }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
       await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
       return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
         ...task,
-        assigneeId,
         status: task.status === 'open' ? 'in_progress' : task.status,
+        claimants: assignee
+          ? addClaimant(task, {
+              userId: assigneeId,
+              displayName: assignee.displayName,
+              avatarColor: assignee.avatarColor,
+              hasAvatar: assignee.hasAvatar,
+              points: null,
+              claimedAt: new Date().toISOString(),
+            })
+          : task.claimants,
       }));
     },
     onError: (_err, { taskId }, context) => {
       restoreSnapshot(queryClient, projectId, taskId, context);
     },
+    onSettled: (_data, _err, { taskId }) => {
+      invalidateTask(queryClient, projectId, taskId);
+    },
+  });
+}
+
+/** Variables for deliver: task id + the allocations payload. */
+export interface DeliverTaskVars {
+  taskId: string;
+  input: DeliverTaskInput;
+}
+
+/**
+ * Deliver a task for review (lifecycle v2 §3): submit the points split. Moves the
+ * task to pending_review server-side; no optimistic mutation (the server validates
+ * the split), we just reconcile on settle.
+ */
+export function useDeliverTask(
+  projectId: string,
+): UseMutationResult<TaskResponse, Error, DeliverTaskVars> {
+  const queryClient = useQueryClient();
+  return useMutation<TaskResponse, Error, DeliverTaskVars>({
+    mutationFn: ({ taskId, input }) => tasksApi.deliver(taskId, input),
+    onSettled: (_data, _err, { taskId }) => {
+      invalidateTask(queryClient, projectId, taskId);
+    },
+  });
+}
+
+/** Variables for review: task id + decision (+ optional rejection reason). */
+export interface ReviewTaskVars {
+  taskId: string;
+  input: ReviewTaskInput;
+}
+
+/**
+ * Review a delivered task (lifecycle v2 §3, lead/admin only): approve → done, or
+ * reject → in_progress (with an optional reason). Reconciles on settle; completing
+ * shifts contribution stats, so the stats queries are invalidated too.
+ */
+export function useReviewTask(
+  projectId: string,
+): UseMutationResult<TaskResponse, Error, ReviewTaskVars> {
+  const queryClient = useQueryClient();
+  return useMutation<TaskResponse, Error, ReviewTaskVars>({
+    mutationFn: ({ taskId, input }) => tasksApi.review(taskId, input),
     onSettled: (_data, _err, { taskId }) => {
       invalidateTask(queryClient, projectId, taskId);
     },

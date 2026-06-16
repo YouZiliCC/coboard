@@ -1,8 +1,9 @@
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import type { User, Task } from 'shared';
+import type { Task } from 'shared';
 import { cn } from '../../lib/utils';
 import { TaskCard } from './TaskCard';
+import type { TaskPermissionContext } from './permissions';
 
 /**
  * dnd-kit sortable wrapper around {@link TaskCard} (§6.1). Makes the card
@@ -14,14 +15,14 @@ import { TaskCard } from './TaskCard';
 export interface SortableTaskCardProps {
   task: Task;
   projectId: string;
-  assignee?: User | undefined;
+  permCtx: TaskPermissionContext;
   onOpen?: (taskId: string) => void;
 }
 
 export function SortableTaskCard({
   task,
   projectId,
-  assignee,
+  permCtx,
   onOpen,
 }: SortableTaskCardProps): JSX.Element {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -40,7 +41,7 @@ export function SortableTaskCard({
       {...attributes}
       {...listeners}
     >
-      <TaskCard task={task} projectId={projectId} assignee={assignee} onOpen={onOpen} />
+      <TaskCard task={task} projectId={projectId} permCtx={permCtx} onOpen={onOpen} />
     </div>
   );
 }

@@ -97,20 +97,47 @@ export const projectMemberWithUserSchema = projectMemberSchema.extend({
 });
 export type ProjectMemberWithUser = z.infer<typeof projectMemberWithUserSchema>;
 
+/**
+ * A claimant of a task as embedded in the task wire shape (lifecycle v2 §2/§3):
+ * the user's display summary plus their points share. `points` is null until the
+ * task is delivered (and is reset to null again on a reject). This is a display
+ * summary; the full user row is not carried.
+ */
+export const taskClaimantSchema = z.object({
+  userId: uuidSchema,
+  displayName: displayNameSchema,
+  avatarColor: avatarColorSchema,
+  /** Whether the claimant has an uploaded avatar (fetch via /users/:id/avatar). */
+  hasAvatar: z.boolean(),
+  /** Per-claimant points share; null until delivered / after a reject. */
+  points: z.number().int().nullable(),
+  claimedAt: isoDateTimeSchema,
+});
+export type TaskClaimant = z.infer<typeof taskClaimantSchema>;
+
+/**
+ * Task wire shape (lifecycle v2 §2/§3). The single `assigneeId`/`completedBy`
+ * fields are gone — the set of workers is carried in `claimants`. `deliveredAt`/
+ * `deliveredBy` are set on deliver and cleared on reject; `reviewedBy` is the last
+ * reviewer; `completedAt` is set when a review approves the task.
+ */
 export const taskSchema = z.object({
   id: uuidSchema,
   projectId: uuidSchema,
   title: z.string(),
   description: z.string().nullable(),
   status: taskStatusSchema,
-  assigneeId: uuidSchema.nullable(),
   points: z.number().int().nonnegative().nullable(),
   priority: prioritySchema,
   dueDate: dateOnlySchema.nullable(),
   createdBy: uuidSchema,
   rank: z.string(),
   completedAt: isoDateTimeSchema.nullable(),
-  completedBy: uuidSchema.nullable(),
+  deliveredAt: isoDateTimeSchema.nullable(),
+  deliveredBy: uuidSchema.nullable(),
+  reviewedBy: uuidSchema.nullable(),
+  /** The set of users who have claimed this task, with their points shares. */
+  claimants: z.array(taskClaimantSchema),
   createdAt: isoDateTimeSchema,
 });
 export type Task = z.infer<typeof taskSchema>;
@@ -421,13 +448,61 @@ export const updateTaskInputSchema = z
   });
 export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
 
-/** POST /tasks/:id/assign — lead/admin dispatch. */
+/** POST /tasks/:id/assign — lead/admin dispatch (adds the user to claimants). */
 export const assignTaskInputSchema = z.object({
   assigneeId: uuidSchema,
 });
 export type AssignTaskInput = z.infer<typeof assignTaskInputSchema>;
 
-// /tasks/:id/claim and /tasks/:id/release take no body.
+// /tasks/:id/claim takes no body.
+
+/**
+ * POST /tasks/:id/release — optional body (lifecycle v2 §3). Self-release omits the
+ * body; a lead/admin may remove another claimant by passing their `userId`.
+ */
+export const releaseTaskInputSchema = z.object({
+  userId: uuidSchema.optional(),
+});
+export type ReleaseTaskInput = z.infer<typeof releaseTaskInputSchema>;
+
+/**
+ * One claimant's points share within a deliver request (lifecycle v2 §3). Points
+ * are non-negative integers; the allocations must cover exactly the current set of
+ * claimants and their sum must equal the task points (or `totalPoints`).
+ */
+export const deliverAllocationSchema = z.object({
+  userId: uuidSchema,
+  points: z.number().int().nonnegative().max(100000),
+});
+export type DeliverAllocation = z.infer<typeof deliverAllocationSchema>;
+
+/**
+ * POST /tasks/:id/deliver — a claimant (or lead/admin) submits the points split
+ * for review (lifecycle v2 §3). `allocations` must cover every current claimant.
+ * When the task has no points yet, `totalPoints` supplies the total to split and is
+ * written back onto the task. The server re-validates that the sum matches.
+ */
+export const deliverTaskInputSchema = z.object({
+  allocations: z.array(deliverAllocationSchema).min(1, '至少需要一个认领者的分配'),
+  /** Required only when the task has no points; the total to split + persist. */
+  totalPoints: z.number().int().nonnegative().max(100000).optional(),
+});
+export type DeliverTaskInput = z.infer<typeof deliverTaskInputSchema>;
+
+/** Review decision (lifecycle v2 §3). */
+export const reviewDecisionSchema = z.enum(['approve', 'reject']);
+export type ReviewDecision = z.infer<typeof reviewDecisionSchema>;
+
+/**
+ * POST /tasks/:id/review — lead/admin approves or rejects a `pending_review` task
+ * (lifecycle v2 §3). `approve` → done (shares locked); `reject` → in_progress with
+ * shares cleared. `comment` is an optional rejection reason recorded on the activity.
+ */
+export const reviewTaskInputSchema = z.object({
+  decision: reviewDecisionSchema,
+  comment: z.string().trim().max(2000).optional(),
+});
+export type ReviewTaskInput = z.infer<typeof reviewTaskInputSchema>;
 
 // ---------------------------------------------------------------------------
 // Comments & activities (§7)

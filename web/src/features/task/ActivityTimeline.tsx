@@ -28,6 +28,16 @@ function describe(activity: ActivityWithActor): string {
     const to = asStatusLabel(activity.meta['to']);
     if (from && to) return `将状态从「${from}」变更为「${to}」`;
   }
+  if (activity.type === 'delivered') {
+    const total = activity.meta['totalPoints'];
+    if (typeof total === 'number') return `${base}（共 ${total} 点）`;
+  }
+  if (activity.type === 'rejected') {
+    const comment = activity.meta['comment'];
+    if (typeof comment === 'string' && comment.trim()) {
+      return `${base}：${comment}`;
+    }
+  }
   return base;
 }
 

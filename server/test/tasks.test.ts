@@ -5,6 +5,7 @@ import type { Database } from '../src/db/index.js';
 import {
   projectMembers,
   projects,
+  taskClaimants,
   tasks,
   users,
   type NewTaskRow,
@@ -15,13 +16,14 @@ import type { TestContext } from './helpers.js';
 import { createTestContext } from './helpers.js';
 
 /**
- * Task / board feature tests (§6.1, §6.2, §10). Covers the characteristic domain
- * logic: claim race (one winner, the other 409), claim → in_progress, completion
- * attribution (completed_by), reopen clearing it, and the permission matrix.
+ * Task / board feature tests (lifecycle v2 §1–§4, §10). Covers the characteristic
+ * domain logic of the multi-claimant + deliver/review model: claim adds to the
+ * claimant set (idempotent, multi-claimant), release removes a claimant, dispatch
+ * adds a claimant, the deliver → review (approve / reject) flow with points
+ * allocation, and the permission matrix.
  *
- * Auth: the auth/login route is still a stub during parallel development, so tests
- * authenticate by seeding a session row directly and signing the session cookie —
- * exactly what the production auth pre-handler reads.
+ * Auth: tests authenticate by seeding a session row directly and signing the
+ * session cookie — exactly what the production auth pre-handler reads.
  */
 
 const CSRF = { 'x-requested-with': 'XMLHttpRequest' };
@@ -103,6 +105,20 @@ async function getTaskRow(id: string) {
   return rows[0];
 }
 
+/** Seed a claimant row directly (lifecycle v2 §2). */
+async function seedClaimant(
+  taskId: string,
+  userId: string,
+  points: number | null = null,
+): Promise<void> {
+  await db.insert(taskClaimants).values({ taskId, userId, points });
+}
+
+/** Load the claimant rows for a task. */
+async function getClaimants(taskId: string) {
+  return db.select().from(taskClaimants).where(eq(taskClaimants.taskId, taskId));
+}
+
 beforeEach(async () => {
   // Fresh database per test for isolation.
   if (ctx) await ctx.cleanup();
@@ -181,11 +197,11 @@ describe('POST /projects/:id/tasks (create)', () => {
     expect(res.statusCode).toBe(201);
     const { task } = res.json() as { task: Task };
     expect(task.status).toBe('open');
-    expect(task.assigneeId).toBeNull();
+    expect(task.claimants).toHaveLength(0);
     expect(task.priority).toBe('medium');
   });
 
-  it('dispatches to in_progress when assigneeId is given', async () => {
+  it('dispatches to in_progress with a claimant when assigneeId is given', async () => {
     const u = await seedUser('member');
     const projectId = await seedProject(u.id);
     await addMember(projectId, u.id, 'member');
@@ -199,14 +215,14 @@ describe('POST /projects/:id/tasks (create)', () => {
     expect(res.statusCode).toBe(201);
     const { task } = res.json() as { task: Task };
     expect(task.status).toBe('in_progress');
-    expect(task.assigneeId).toBe(u.id);
+    expect(task.claimants.map((c) => c.userId)).toEqual([u.id]);
     expect(task.points).toBe(5);
     expect(task.priority).toBe('high');
   });
 });
 
 describe('POST /tasks/:id/claim', () => {
-  it('claims an open, unassigned task → assignee=self, status=in_progress', async () => {
+  it('claims an open task → caller joins claimants, status=in_progress', async () => {
     const u = await seedUser('member');
     const projectId = await seedProject(u.id);
     await addMember(projectId, u.id, 'member');
@@ -219,11 +235,11 @@ describe('POST /tasks/:id/claim', () => {
     });
     expect(res.statusCode).toBe(200);
     const { task } = res.json() as { task: Task };
-    expect(task.assigneeId).toBe(u.id);
+    expect(task.claimants.map((c) => c.userId)).toEqual([u.id]);
     expect(task.status).toBe('in_progress');
   });
 
-  it('returns 409 to the second of two concurrent claimers', async () => {
+  it('lets multiple members claim the same task (multi-claimant)', async () => {
     const a = await seedUser('member');
     const b = await seedUser('member');
     const projectId = await seedProject(a.id);
@@ -231,7 +247,7 @@ describe('POST /tasks/:id/claim', () => {
     await addMember(projectId, b.id, 'member');
     const taskId = await seedTask({ projectId, createdBy: a.id });
 
-    // Fire both claims concurrently.
+    // Fire both claims concurrently; both should succeed (the set absorbs both).
     const [r1, r2] = await Promise.all([
       ctx.app.inject({
         method: 'POST',
@@ -245,16 +261,37 @@ describe('POST /tasks/:id/claim', () => {
       }),
     ]);
 
-    const codes = [r1.statusCode, r2.statusCode].sort();
-    expect(codes).toEqual([200, 409]);
+    expect(r1.statusCode).toBe(200);
+    expect(r2.statusCode).toBe(200);
 
-    // Exactly one winner; the task is claimed by one of them.
     const row = await getTaskRow(taskId);
     expect(row?.status).toBe('in_progress');
-    expect([a.id, b.id]).toContain(row?.assigneeId);
+    const claimants = await getClaimants(taskId);
+    expect(claimants.map((c) => c.userId).sort()).toEqual([a.id, b.id].sort());
   });
 
-  it('returns 409 when claiming an already in_progress task', async () => {
+  it('is idempotent: re-claiming an already-claimed task keeps a single membership', async () => {
+    const a = await seedUser('member');
+    const projectId = await seedProject(a.id);
+    await addMember(projectId, a.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: a.id,
+      status: 'in_progress',
+    });
+    await seedClaimant(taskId, a.id);
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/claim`,
+      headers: { cookie: a.cookie, ...CSRF },
+    });
+    expect(res.statusCode).toBe(200);
+    const claimants = await getClaimants(taskId);
+    expect(claimants).toHaveLength(1);
+  });
+
+  it('returns 409 when claiming a done task', async () => {
     const a = await seedUser('member');
     const b = await seedUser('member');
     const projectId = await seedProject(a.id);
@@ -263,9 +300,9 @@ describe('POST /tasks/:id/claim', () => {
     const taskId = await seedTask({
       projectId,
       createdBy: a.id,
-      status: 'in_progress',
-      assigneeId: a.id,
+      status: 'done',
     });
+    await seedClaimant(taskId, a.id);
 
     const res = await ctx.app.inject({
       method: 'POST',
@@ -277,7 +314,7 @@ describe('POST /tasks/:id/claim', () => {
 });
 
 describe('POST /tasks/:id/release', () => {
-  it('lets the assignee release back to open/unassigned', async () => {
+  it('lets a sole claimant release → task returns to open with no claimants', async () => {
     const u = await seedUser('member');
     const projectId = await seedProject(u.id);
     await addMember(projectId, u.id, 'member');
@@ -285,8 +322,8 @@ describe('POST /tasks/:id/release', () => {
       projectId,
       createdBy: u.id,
       status: 'in_progress',
-      assigneeId: u.id,
     });
+    await seedClaimant(taskId, u.id);
 
     const res = await ctx.app.inject({
       method: 'POST',
@@ -295,28 +332,79 @@ describe('POST /tasks/:id/release', () => {
     });
     expect(res.statusCode).toBe(200);
     const { task } = res.json() as { task: Task };
-    expect(task.assigneeId).toBeNull();
+    expect(task.claimants).toHaveLength(0);
     expect(task.status).toBe('open');
   });
 
-  it('forbids a non-assignee, non-lead member from releasing', async () => {
+  it('keeps the task in_progress while other claimants remain', async () => {
+    const a = await seedUser('member');
+    const b = await seedUser('member');
+    const projectId = await seedProject(a.id);
+    await addMember(projectId, a.id, 'member');
+    await addMember(projectId, b.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: a.id,
+      status: 'in_progress',
+    });
+    await seedClaimant(taskId, a.id);
+    await seedClaimant(taskId, b.id);
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/release`,
+      headers: { cookie: a.cookie, ...CSRF },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('in_progress');
+    expect(task.claimants.map((c) => c.userId)).toEqual([b.id]);
+  });
+
+  it('lets a lead remove another claimant via userId', async () => {
+    const lead = await seedUser('member');
+    const worker = await seedUser('member');
+    const projectId = await seedProject(lead.id);
+    await addMember(projectId, lead.id, 'lead');
+    await addMember(projectId, worker.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: lead.id,
+      status: 'in_progress',
+    });
+    await seedClaimant(taskId, worker.id);
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/release`,
+      headers: { cookie: lead.cookie, ...CSRF },
+      payload: { userId: worker.id },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.claimants).toHaveLength(0);
+    expect(task.status).toBe('open');
+  });
+
+  it('forbids a plain member from removing another claimant', async () => {
     const owner = await seedUser('member');
-    const assignee = await seedUser('member');
+    const claimant = await seedUser('member');
     const other = await seedUser('member');
     const projectId = await seedProject(owner.id);
-    await addMember(projectId, assignee.id, 'member');
+    await addMember(projectId, claimant.id, 'member');
     await addMember(projectId, other.id, 'member');
     const taskId = await seedTask({
       projectId,
       createdBy: owner.id,
       status: 'in_progress',
-      assigneeId: assignee.id,
     });
+    await seedClaimant(taskId, claimant.id);
 
     const res = await ctx.app.inject({
       method: 'POST',
       url: `/api/tasks/${taskId}/release`,
       headers: { cookie: other.cookie, ...CSRF },
+      payload: { userId: claimant.id },
     });
     expect(res.statusCode).toBe(403);
   });
@@ -339,7 +427,7 @@ describe('POST /tasks/:id/assign (dispatch)', () => {
     });
     expect(res.statusCode).toBe(200);
     const { task } = res.json() as { task: Task };
-    expect(task.assigneeId).toBe(worker.id);
+    expect(task.claimants.map((c) => c.userId)).toEqual([worker.id]);
     expect(task.status).toBe('in_progress');
   });
 
@@ -362,59 +450,11 @@ describe('POST /tasks/:id/assign (dispatch)', () => {
 });
 
 describe('PATCH /tasks/:id (status transitions)', () => {
-  it('completing sets completed_at and completed_by to the assignee', async () => {
+  it('allows the direct open → in_progress board move', async () => {
     const u = await seedUser('member');
     const projectId = await seedProject(u.id);
     await addMember(projectId, u.id, 'member');
-    const taskId = await seedTask({
-      projectId,
-      createdBy: u.id,
-      status: 'in_progress',
-      assigneeId: u.id,
-    });
-
-    const res = await ctx.app.inject({
-      method: 'PATCH',
-      url: `/api/tasks/${taskId}`,
-      headers: { cookie: u.cookie, ...CSRF },
-      payload: { status: 'done' },
-    });
-    expect(res.statusCode).toBe(200);
-    const { task } = res.json() as { task: Task };
-    expect(task.status).toBe('done');
-    expect(task.completedAt).not.toBeNull();
-    expect(task.completedBy).toBe(u.id);
-  });
-
-  it('falls back to the operator for completed_by when unassigned', async () => {
-    const lead = await seedUser('member');
-    const projectId = await seedProject(lead.id);
-    await addMember(projectId, lead.id, 'lead');
-    const taskId = await seedTask({ projectId, createdBy: lead.id, status: 'open' });
-
-    const res = await ctx.app.inject({
-      method: 'PATCH',
-      url: `/api/tasks/${taskId}`,
-      headers: { cookie: lead.cookie, ...CSRF },
-      payload: { status: 'done' },
-    });
-    expect(res.statusCode).toBe(200);
-    const { task } = res.json() as { task: Task };
-    expect(task.completedBy).toBe(lead.id);
-  });
-
-  it('reopening a done task clears completed_at and completed_by', async () => {
-    const u = await seedUser('member');
-    const projectId = await seedProject(u.id);
-    await addMember(projectId, u.id, 'member');
-    const taskId = await seedTask({
-      projectId,
-      createdBy: u.id,
-      status: 'done',
-      assigneeId: u.id,
-      completedAt: new Date(),
-      completedBy: u.id,
-    });
+    const taskId = await seedTask({ projectId, createdBy: u.id, status: 'open' });
 
     const res = await ctx.app.inject({
       method: 'PATCH',
@@ -425,8 +465,46 @@ describe('PATCH /tasks/:id (status transitions)', () => {
     expect(res.statusCode).toBe(200);
     const { task } = res.json() as { task: Task };
     expect(task.status).toBe('in_progress');
-    expect(task.completedAt).toBeNull();
-    expect(task.completedBy).toBeNull();
+  });
+
+  it('allows the direct in_progress → open board move', async () => {
+    const u = await seedUser('member');
+    const projectId = await seedProject(u.id);
+    await addMember(projectId, u.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: u.id,
+      status: 'in_progress',
+    });
+
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/tasks/${taskId}`,
+      headers: { cookie: u.cookie, ...CSRF },
+      payload: { status: 'open' },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('open');
+  });
+
+  it('rejects jumping straight to done via PATCH (deliver/review owns it)', async () => {
+    const u = await seedUser('member');
+    const projectId = await seedProject(u.id);
+    await addMember(projectId, u.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: u.id,
+      status: 'in_progress',
+    });
+
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/tasks/${taskId}`,
+      headers: { cookie: u.cookie, ...CSRF },
+      payload: { status: 'done' },
+    });
+    expect(res.statusCode).toBe(400);
   });
 
   it('forbids editing a task you neither created nor are assigned to', async () => {
@@ -444,6 +522,249 @@ describe('PATCH /tasks/:id (status transitions)', () => {
       payload: { title: '改个标题' },
     });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+describe('deliver → review lifecycle (§3)', () => {
+  /** Seed a project with a lead + two members and an in_progress task they claim. */
+  async function seedDeliverable(opts: { points?: number | null } = {}) {
+    const lead = await seedUser('member');
+    const a = await seedUser('member');
+    const b = await seedUser('member');
+    const projectId = await seedProject(lead.id);
+    await addMember(projectId, lead.id, 'lead');
+    await addMember(projectId, a.id, 'member');
+    await addMember(projectId, b.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: lead.id,
+      status: 'in_progress',
+      points: opts.points === undefined ? 10 : opts.points,
+    });
+    await seedClaimant(taskId, a.id);
+    await seedClaimant(taskId, b.id);
+    return { lead, a, b, projectId, taskId };
+  }
+
+  it('delivers with allocations summing to the task points → pending_review', async () => {
+    const { a, b, taskId } = await seedDeliverable({ points: 10 });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 4 },
+      ] },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('pending_review');
+    expect(task.deliveredBy).toBe(a.id);
+    expect(task.deliveredAt).not.toBeNull();
+    const shares = Object.fromEntries(task.claimants.map((c) => [c.userId, c.points]));
+    expect(shares[a.id]).toBe(6);
+    expect(shares[b.id]).toBe(4);
+  });
+
+  it('rejects a delivery whose allocations do not sum to the task points', async () => {
+    const { a, b, taskId } = await seedDeliverable({ points: 10 });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 5 }, // sums to 11 ≠ 10
+      ] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a delivery that omits a current claimant', async () => {
+    const { a, taskId } = await seedDeliverable({ points: 10 });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [{ userId: a.id, points: 10 }] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a delivery that allocates to a non-claimant', async () => {
+    const { a, b, lead, taskId } = await seedDeliverable({ points: 10 });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 4 },
+        { userId: b.id, points: 3 },
+        { userId: lead.id, points: 3 }, // lead is not a claimant
+      ] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('uses totalPoints and writes it back when the task has no points', async () => {
+    const { a, b, taskId } = await seedDeliverable({ points: null });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: {
+        totalPoints: 8,
+        allocations: [
+          { userId: a.id, points: 5 },
+          { userId: b.id, points: 3 },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('pending_review');
+    expect(task.points).toBe(8);
+  });
+
+  it('requires totalPoints when the task has no points', async () => {
+    const { a, b, taskId } = await seedDeliverable({ points: null });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 5 },
+        { userId: b.id, points: 3 },
+      ] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('forbids delivering a task you neither claim nor lead', async () => {
+    const { taskId } = await seedDeliverable({ points: 10 });
+    const outsider = await seedUser('member');
+    // Add the outsider to the project so they pass the visibility guard but are
+    // neither a claimant nor a lead.
+    const row = await getTaskRow(taskId);
+    await addMember(row!.projectId, outsider.id, 'member');
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: outsider.cookie, ...CSRF },
+      payload: { allocations: [{ userId: outsider.id, points: 10 }] },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('approves a delivered task → done, completed_at set, reviewer recorded', async () => {
+    const { lead, a, b, taskId } = await seedDeliverable({ points: 10 });
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 4 },
+      ] },
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/review`,
+      headers: { cookie: lead.cookie, ...CSRF },
+      payload: { decision: 'approve' },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('done');
+    expect(task.completedAt).not.toBeNull();
+    expect(task.reviewedBy).toBe(lead.id);
+    // Shares stay locked at approval.
+    const shares = Object.fromEntries(task.claimants.map((c) => [c.userId, c.points]));
+    expect(shares[a.id]).toBe(6);
+    expect(shares[b.id]).toBe(4);
+  });
+
+  it('rejects a delivered task → back to in_progress with points cleared', async () => {
+    const { lead, a, b, taskId } = await seedDeliverable({ points: 10 });
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 4 },
+      ] },
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/review`,
+      headers: { cookie: lead.cookie, ...CSRF },
+      payload: { decision: 'reject', comment: '需要补充测试' },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('in_progress');
+    expect(task.deliveredAt).toBeNull();
+    expect(task.deliveredBy).toBeNull();
+    expect(task.reviewedBy).toBe(lead.id);
+    // Each claimant's share is cleared back to null on reject.
+    expect(task.claimants.every((c) => c.points === null)).toBe(true);
+  });
+
+  it('forbids a plain member from reviewing', async () => {
+    const { a, b, taskId } = await seedDeliverable({ points: 10 });
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 4 },
+      ] },
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/review`,
+      headers: { cookie: b.cookie, ...CSRF },
+      payload: { decision: 'approve' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('rejects delivering a task that is not in_progress', async () => {
+    const { a, b, taskId } = await seedDeliverable({ points: 10 });
+    // Move it to pending_review first.
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 4 },
+      ] },
+    });
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: a.cookie, ...CSRF },
+      payload: { allocations: [
+        { userId: a.id, points: 6 },
+        { userId: b.id, points: 4 },
+      ] },
+    });
+    expect(res.statusCode).toBe(409);
   });
 });
 

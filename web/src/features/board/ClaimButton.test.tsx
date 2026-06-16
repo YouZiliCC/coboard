@@ -1,13 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { User, Task } from 'shared';
+import type { TaskClaimant, User, Task } from 'shared';
 import { ClaimButton } from './ClaimButton';
 
 /**
- * ClaimButton tests (§10 — 认领按钮). Verifies the button is shown only for
- * unassigned open tasks, triggers the claim mutation on click, and is hidden for
- * already-assigned or non-open tasks.
+ * ClaimButton tests (§10 — 认领按钮; lifecycle v2). Verifies the button shows for a
+ * claimable task the current user has not claimed, triggers the claim mutation on
+ * click, and is hidden once the user is a claimant or the task left the claimable
+ * states.
  */
 
 const mockUser: User = {
@@ -37,6 +38,17 @@ vi.mock('../../api/tasks', () => ({
   useClaimTask: () => ({ mutate: claimMutate, isPending: false }),
 }));
 
+function makeClaimant(userId: string, displayName: string): TaskClaimant {
+  return {
+    userId,
+    displayName,
+    avatarColor: '#3b82f6',
+    hasAvatar: false,
+    points: null,
+    claimedAt: '2026-06-15T00:00:00.000Z',
+  };
+}
+
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
@@ -44,14 +56,16 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     title: '任务',
     description: null,
     status: 'open',
-    assigneeId: null,
     points: null,
     priority: 'medium',
     dueDate: null,
     createdBy: 'user-1',
     rank: 'm',
     completedAt: null,
-    completedBy: null,
+    deliveredAt: null,
+    deliveredBy: null,
+    reviewedBy: null,
+    claimants: [],
     createdAt: '2026-06-15T00:00:00.000Z',
     ...overrides,
   };
@@ -62,8 +76,18 @@ describe('ClaimButton', () => {
     claimMutate.mockReset();
   });
 
-  it('renders for an unassigned open task', () => {
+  it('renders for a claimable task the user has not claimed', () => {
     render(<ClaimButton task={makeTask()} projectId="project-1" />);
+    expect(screen.getByRole('button', { name: '认领任务' })).toBeTruthy();
+  });
+
+  it('renders for an in_progress task the user has not claimed', () => {
+    render(
+      <ClaimButton
+        task={makeTask({ status: 'in_progress', claimants: [makeClaimant('user-2', '李四')] })}
+        projectId="project-1"
+      />,
+    );
     expect(screen.getByRole('button', { name: '认领任务' })).toBeTruthy();
   });
 
@@ -75,17 +99,17 @@ describe('ClaimButton', () => {
     expect(claimMutate.mock.calls[0]?.[0]).toBe('task-1');
   });
 
-  it('renders nothing for an already-assigned task', () => {
+  it('renders nothing when the user is already a claimant', () => {
     const { container } = render(
       <ClaimButton
-        task={makeTask({ assigneeId: 'user-2', status: 'in_progress' })}
+        task={makeTask({ status: 'in_progress', claimants: [makeClaimant('user-1', '张三')] })}
         projectId="project-1"
       />,
     );
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders nothing for a non-open task', () => {
+  it('renders nothing for a non-claimable (done) task', () => {
     const { container } = render(
       <ClaimButton task={makeTask({ status: 'done' })} projectId="project-1" />,
     );

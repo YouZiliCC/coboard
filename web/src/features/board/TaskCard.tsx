@@ -1,21 +1,34 @@
-import { CalendarClock, MessageSquare } from 'lucide-react';
-import type { User, Task } from 'shared';
-import { Avatar, Badge } from '../../components/ui';
-import { avatarUrl, cn } from '../../lib/utils';
+import { useState } from 'react';
+import { CalendarClock, PackageCheck } from 'lucide-react';
+import type { Task } from 'shared';
+import { Badge, Button } from '../../components/ui';
+import { cn } from '../../lib/utils';
 import { ClaimButton } from './ClaimButton';
+import { ClaimantAvatars } from './ClaimantAvatars';
+import { DeliverDialog } from './DeliverDialog';
+import { ReviewActions } from './ReviewActions';
 import { dueInfo } from './format';
 import { PRIORITY_BADGE, PRIORITY_LABELS } from './labels';
+import {
+  canClaim,
+  canDeliver,
+  canReview,
+  type TaskPermissionContext,
+} from './permissions';
 
 /**
- * Board task card (§6.1). Presents title, assignee avatar, points badge, priority
- * and due date; shows a {@link ClaimButton} for unassigned open tasks. Purely
- * presentational and dnd-agnostic — {@link SortableTaskCard} wraps it for drag.
+ * Board task card (lifecycle v2 §5). Presents title, stacked claimant avatars,
+ * points badge, priority and due date. State/role-aware actions: 认领 (open/
+ * in_progress, when not a claimant), 交付 (in_progress claimant/manager → opens the
+ * deliver dialog), 审阅 (pending_review lead/admin → approve/reject) with a 待审阅
+ * badge for non-leads. Purely presentational w.r.t. dnd — {@link SortableTaskCard}
+ * wraps it for drag.
  */
 export interface TaskCardProps {
   task: Task;
   projectId: string;
-  /** Resolve assignee id → user for the avatar (from project members). */
-  assignee?: User | undefined;
+  /** Current user + project role; drives which actions appear. */
+  permCtx?: TaskPermissionContext;
   /** Open the detail drawer. */
   onOpen?: (taskId: string) => void;
   /** True while this card is the active drag overlay (subtle elevation). */
@@ -26,13 +39,19 @@ export interface TaskCardProps {
 export function TaskCard({
   task,
   projectId,
-  assignee,
+  permCtx,
   onOpen,
   dragging = false,
   className,
 }: TaskCardProps): JSX.Element {
   const priority = PRIORITY_BADGE[task.priority];
   const due = dueInfo(task.dueDate);
+  const [deliverOpen, setDeliverOpen] = useState(false);
+
+  const showClaim = permCtx ? canClaim(permCtx, task) : false;
+  const showDeliver = permCtx ? canDeliver(permCtx, task) : false;
+  const showReview = permCtx ? canReview(permCtx, task) : false;
+  const pendingReview = task.status === 'pending_review';
 
   return (
     <article
@@ -71,7 +90,7 @@ export function TaskCard({
         {task.title}
       </h3>
 
-      {/* Footer: due date + assignee/claim */}
+      {/* Footer: due date + claimants */}
       <div className="mt-1 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           {due.label && (
@@ -89,27 +108,48 @@ export function TaskCard({
           )}
         </div>
 
-        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-          {task.assigneeId && assignee ? (
-            <Avatar
-              name={assignee.displayName}
-              color={assignee.avatarColor}
-              imageUrl={assignee.hasAvatar ? avatarUrl(assignee.id) : undefined}
-              size="xs"
-            />
-          ) : task.assigneeId ? (
-            // Assignee present but not resolvable (e.g. not loaded) — neutral dot.
-            <span
-              className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-secondary text-[10px] text-muted-foreground"
-              aria-label="已指派"
+        <ClaimantAvatars claimants={task.claimants} />
+      </div>
+
+      {/* Actions row (state/role-aware) */}
+      {(showClaim || showDeliver || showReview || (pendingReview && !showReview)) && (
+        <div
+          className="mt-1 flex flex-wrap items-center gap-2"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {showClaim && <ClaimButton task={task} projectId={projectId} size="sm" />}
+
+          {showDeliver && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setDeliverOpen(true)}
+              aria-label="交付任务"
             >
-              <MessageSquare className="h-3 w-3" aria-hidden />
-            </span>
-          ) : (
-            <ClaimButton task={task} projectId={projectId} size="sm" />
+              <PackageCheck className="h-3.5 w-3.5" aria-hidden />
+              交付
+            </Button>
+          )}
+
+          {showReview && <ReviewActions task={task} projectId={projectId} size="sm" />}
+
+          {pendingReview && !showReview && (
+            <Badge variant="warning" aria-label="待审阅">
+              待审阅
+            </Badge>
           )}
         </div>
-      </div>
+      )}
+
+      {showDeliver && (
+        <DeliverDialog
+          task={task}
+          projectId={projectId}
+          open={deliverOpen}
+          onOpenChange={setDeliverOpen}
+        />
+      )}
     </article>
   );
 }

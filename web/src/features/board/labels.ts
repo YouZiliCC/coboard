@@ -7,12 +7,18 @@ import type { BadgeVariant } from '../../components/ui';
  * only the board/task features consume these.
  */
 
-/** Board column order (§6.1): 待认领 → 进行中 → 已完成. */
-export const COLUMN_ORDER: readonly TaskStatus[] = ['open', 'in_progress', 'done'];
+/** Board column order (lifecycle v2 §5): 待认领 → 进行中 → 待审阅 → 已完成. */
+export const COLUMN_ORDER: readonly TaskStatus[] = [
+  'open',
+  'in_progress',
+  'pending_review',
+  'done',
+];
 
 export const STATUS_LABELS: Record<TaskStatus, string> = {
   open: '待认领',
   in_progress: '进行中',
+  pending_review: '待审阅',
   done: '已完成',
 };
 
@@ -39,8 +45,10 @@ export const ACTIVITY_LABELS: Record<ActivityType, string> = {
   unassigned: '取消了指派',
   released: '释放了任务',
   status_changed: '变更了状态',
-  completed: '完成了任务',
+  completed: '通过了审阅',
   reopened: '重新打开了任务',
   commented: '发表了评论',
   updated: '更新了任务',
+  delivered: '交付了任务',
+  rejected: '驳回了交付',
 };

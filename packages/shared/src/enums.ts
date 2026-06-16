@@ -16,8 +16,17 @@ export const projectRoles = ['lead', 'member'] as const;
 export const projectRoleSchema = z.enum(projectRoles);
 export type ProjectRole = (typeof projectRoles)[number];
 
-/** Task / board column status (§5 tasks.status, §6.1). */
-export const taskStatuses = ['open', 'in_progress', 'done'] as const;
+/**
+ * Task / board column status (§6.1; lifecycle v2 §1). The board now has four
+ * columns: open → in_progress → pending_review → done. `pending_review` is the
+ * post-deliver state awaiting a lead/admin review (v2 §1).
+ */
+export const taskStatuses = [
+  'open',
+  'in_progress',
+  'pending_review',
+  'done',
+] as const;
 export const taskStatusSchema = z.enum(taskStatuses);
 export type TaskStatus = (typeof taskStatuses)[number];
 
@@ -26,7 +35,11 @@ export const priorities = ['low', 'medium', 'high', 'urgent'] as const;
 export const prioritySchema = z.enum(priorities);
 export type Priority = (typeof priorities)[number];
 
-/** Activity / timeline event type (§5 activities.type). */
+/**
+ * Activity / timeline event type (§5 activities.type). Lifecycle v2 (§3) adds
+ * `delivered` (a claimant/lead submitted points allocations for review) and
+ * `rejected` (a lead/admin sent the task back to in_progress).
+ */
 export const activityTypes = [
   'created',
   'claimed',
@@ -38,6 +51,8 @@ export const activityTypes = [
   'reopened',
   'commented',
   'updated',
+  'delivered',
+  'rejected',
 ] as const;
 export const activityTypeSchema = z.enum(activityTypes);
 export type ActivityType = (typeof activityTypes)[number];

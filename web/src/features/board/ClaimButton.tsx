@@ -7,12 +7,10 @@ import { isApiClientError } from '../../api/client';
 import { useClaimTask } from '../../api/tasks';
 
 /**
- * Claim control (§6.2). Shown on unassigned `open` cards. Any project member may
- * claim → server sets assignee=self, status=in_progress, records `claimed`.
- *
- * A lost race (two members claim at once) surfaces as a 409 from the server; the
- * optimistic update in {@link useClaimTask} rolls back automatically, and we show
- * a brief inline notice.
+ * Claim control (lifecycle v2 §3/§5). Shown on `open`/`in_progress` cards when the
+ * caller is not already a claimant. Any project member may claim → the server adds
+ * them to the claimants set and moves an open task to in_progress, recording
+ * `claimed`. A conflict (e.g. the task left the claimable states) surfaces inline.
  */
 export interface ClaimButtonProps {
   task: Task;
@@ -32,11 +30,24 @@ export function ClaimButton({
   onClaimed,
 }: ClaimButtonProps): JSX.Element | null {
   const { user } = useAuth();
-  const claim = useClaimTask(projectId, user?.id ?? '');
+  const claim = useClaimTask(
+    projectId,
+    user
+      ? {
+          id: user.id,
+          displayName: user.displayName,
+          avatarColor: user.avatarColor,
+          hasAvatar: user.hasAvatar,
+        }
+      : undefined,
+  );
   const [conflict, setConflict] = useState(false);
 
-  // Only meaningful for an unassigned, open task and a logged-in user.
-  if (!user || task.assigneeId !== null || task.status !== 'open') {
+  const claimable = task.status === 'open' || task.status === 'in_progress';
+  const alreadyClaimant = !!user && task.claimants.some((c) => c.userId === user.id);
+
+  // Only meaningful for a claimable task the logged-in user hasn't already claimed.
+  if (!user || !claimable || alreadyClaimant) {
     return null;
   }
 
@@ -67,7 +78,7 @@ export function ClaimButton({
         认领
       </Button>
       {conflict && (
-        <p className="mt-1 text-xs text-destructive">该任务已被他人认领</p>
+        <p className="mt-1 text-xs text-destructive">该任务暂时无法认领</p>
       )}
     </div>
   );

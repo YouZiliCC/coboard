@@ -1,27 +1,29 @@
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import type { User, Task, TaskStatus } from 'shared';
+import type { Task, TaskStatus } from 'shared';
 import { cn } from '../../lib/utils';
 import { SortableTaskCard } from './SortableTaskCard';
 import { STATUS_LABELS } from './labels';
+import type { TaskPermissionContext } from './permissions';
 
 /**
- * A single board column (§6.1) — a droppable region hosting a vertical sortable
- * list of task cards. Empty columns remain valid drop targets via the
+ * A single board column (lifecycle v2 §5) — a droppable region hosting a vertical
+ * sortable list of task cards. Empty columns remain valid drop targets via the
  * `useDroppable` ref on the column id (the column's status).
  */
 export interface ColumnProps {
   status: TaskStatus;
   tasks: Task[];
   projectId: string;
-  /** assignee id → user lookup for avatars. */
-  usersById: Map<string, User>;
+  /** Current user + project role; forwarded to each card for action gating. */
+  permCtx: TaskPermissionContext;
   onOpenTask?: (taskId: string) => void;
 }
 
 const COLUMN_ACCENT: Record<TaskStatus, string> = {
   open: 'bg-muted-foreground/40',
   in_progress: 'bg-primary',
+  pending_review: 'bg-warning',
   done: 'bg-success',
 };
 
@@ -29,7 +31,7 @@ export function Column({
   status,
   tasks,
   projectId,
-  usersById,
+  permCtx,
   onOpenTask,
 }: ColumnProps): JSX.Element {
   const { setNodeRef, isOver } = useDroppable({ id: status, data: { type: 'column', status } });
@@ -63,7 +65,7 @@ export function Column({
               key={task.id}
               task={task}
               projectId={projectId}
-              assignee={task.assigneeId ? usersById.get(task.assigneeId) : undefined}
+              permCtx={permCtx}
               onOpen={onOpenTask}
             />
           ))}

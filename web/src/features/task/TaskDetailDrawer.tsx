@@ -3,10 +3,12 @@ import {
   CalendarClock,
   Check,
   MessageSquare,
+  PackageCheck,
   Pencil,
   History,
   Trash2,
   UserMinus,
+  UserPlus,
   X,
 } from 'lucide-react';
 import type { Priority, Task } from 'shared';
@@ -43,13 +45,18 @@ import {
 } from '../../api/tasks';
 import { useActivities, useComments } from '../../api/comments';
 import { ClaimButton } from '../board/ClaimButton';
+import { DeliverDialog } from '../board/DeliverDialog';
+import { ReviewActions } from '../board/ReviewActions';
 import { dueInfo } from '../board/format';
 import { PRIORITY_BADGE, PRIORITY_LABELS, STATUS_LABELS } from '../board/labels';
 import {
   canAssign,
   canDeleteTask,
+  canDeliver,
   canEditTask,
-  canRelease,
+  canReview,
+  isClaimant,
+  isManager,
   resolveProjectRole,
 } from '../board/permissions';
 import { renderMarkdown } from './markdown';
@@ -58,14 +65,15 @@ import { CommentList } from './CommentList';
 import { ActivityTimeline } from './ActivityTimeline';
 
 /**
- * Task detail drawer (§4 features/task). A right-side sheet opened from a board
- * card. Shows editable fields, role-aware assignee controls (claim/release/
- * assign), the comment thread (markdown + @mentions, safely rendered), and the
- * activity timeline. All edits go through the optimistic task mutations.
+ * Task detail drawer (lifecycle v2 §5). A right-side sheet opened from a board
+ * card. Shows editable fields, the claimants list with each one's allocated points,
+ * role-aware claim/release/assign + deliver/review actions, the comment thread
+ * (markdown + @mentions, safely rendered), and the activity timeline (incl.
+ * delivered/reviewed/rejected). All edits go through the optimistic task mutations.
  */
 const PRIORITIES: Priority[] = ['low', 'medium', 'high', 'urgent'];
-const STATUSES = ['open', 'in_progress', 'done'] as const;
-const UNASSIGNED = '__unassigned__';
+/** Only the direct board moves are PATCHable; deliver/review own the rest (§3). */
+const STATUSES = ['open', 'in_progress'] as const;
 
 export interface TaskDetailDrawerProps {
   taskId: string | null;
@@ -110,20 +118,18 @@ function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Elem
   const { data: comments, isLoading: commentsLoading } = useComments(taskId);
   const { data: activities, isLoading: activitiesLoading } = useActivities(taskId);
 
-  const patchTask = usePatchTask(projectId, user?.id);
+  const patchTask = usePatchTask(projectId);
   const assignTask = useAssignTask(projectId);
-  const releaseTask = useReleaseTask(projectId);
+  const releaseTask = useReleaseTask(projectId, user?.id);
   const deleteTask = useDeleteTask(projectId);
 
   const [tab, setTab] = useState<Tab>('comments');
   const [editing, setEditing] = useState(false);
+  const [deliverOpen, setDeliverOpen] = useState(false);
 
   const projectRole = resolveProjectRole(members, user?.id);
   const permCtx = { user, projectRole };
   const memberList = members ?? [];
-  const assignee = task?.assigneeId
-    ? memberList.find((m) => m.userId === task.assigneeId)?.user
-    : undefined;
 
   if (isLoading || !task) {
     return (
@@ -141,10 +147,23 @@ function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Elem
   const editable = canEditTask(permCtx, task);
   const deletable = canDeleteTask(permCtx, task);
   const assignable = canAssign(permCtx);
-  const releasable = canRelease(permCtx, task);
+  const manager = isManager(permCtx);
+  const showDeliver = canDeliver(permCtx, task);
+  const showReview = canReview(permCtx, task);
+  const meClaimant = isClaimant(permCtx, task);
 
   const statusVariant =
-    task.status === 'done' ? 'success' : task.status === 'in_progress' ? 'primary' : 'neutral';
+    task.status === 'done'
+      ? 'success'
+      : task.status === 'pending_review'
+        ? 'warning'
+        : task.status === 'in_progress'
+          ? 'primary'
+          : 'neutral';
+
+  // Members not yet claiming, for the assign dropdown.
+  const claimantIds = new Set(task.claimants.map((c) => c.userId));
+  const assignableMembers = memberList.filter((m) => !claimantIds.has(m.userId));
 
   return (
     <>
@@ -208,64 +227,112 @@ function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Elem
           </div>
         )}
 
-        {/* Meta + assignment controls */}
+        {/* Deliver / review action bar */}
+        {(showDeliver || showReview || (task.status === 'pending_review' && !showReview)) && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-secondary/30 p-3">
+            {showDeliver && (
+              <Button type="button" size="sm" onClick={() => setDeliverOpen(true)}>
+                <PackageCheck className="h-4 w-4" aria-hidden />
+                交付（分配点数）
+              </Button>
+            )}
+            {showReview && <ReviewActions task={task} projectId={projectId} size="md" />}
+            {task.status === 'pending_review' && !showReview && (
+              <span className="text-sm text-muted-foreground">已交付，等待项目负责人审阅。</span>
+            )}
+          </div>
+        )}
+
+        {/* Meta + claimants */}
         <div className="grid gap-3 rounded-lg border border-border bg-secondary/30 p-3">
-          {/* Assignee row */}
-          <div className="flex items-center gap-3">
-            <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">负责人</span>
-            <div className="flex flex-1 flex-wrap items-center gap-2">
-              {assignee ? (
-                <span className="inline-flex items-center gap-2">
-                  <Avatar
-                    name={assignee.displayName}
-                    color={assignee.avatarColor}
-                    imageUrl={assignee.hasAvatar ? avatarUrl(assignee.id) : undefined}
-                    size="xs"
-                  />
-                  <span className="text-sm">{assignee.displayName}</span>
-                </span>
-              ) : task.assigneeId ? (
-                <span className="text-sm text-muted-foreground">已指派</span>
+          {/* Claimants list */}
+          <div className="flex items-start gap-3">
+            <span className="w-16 shrink-0 pt-1 text-xs font-medium text-muted-foreground">
+              认领者
+            </span>
+            <div className="flex flex-1 flex-col gap-2">
+              {task.claimants.length === 0 ? (
+                <span className="text-sm text-muted-foreground">暂无认领者</span>
               ) : (
-                <span className="text-sm text-muted-foreground">未指派</span>
+                task.claimants.map((c) => {
+                  const canRemove = c.userId === user?.id || manager;
+                  return (
+                    <div key={c.userId} className="flex items-center gap-2">
+                      <Avatar
+                        name={c.displayName}
+                        color={c.avatarColor}
+                        imageUrl={c.hasAvatar ? avatarUrl(c.userId) : undefined}
+                        size="xs"
+                      />
+                      <span className="text-sm text-foreground">{c.displayName}</span>
+                      {c.points != null && (
+                        <Badge variant="primary" className="ml-1">
+                          {c.points} 点
+                        </Badge>
+                      )}
+                      {canRemove && (task.status === 'open' || task.status === 'in_progress') && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="ml-auto h-7 w-7 text-muted-foreground hover:text-destructive"
+                          aria-label={`移除 ${c.displayName}`}
+                          loading={releaseTask.isPending}
+                          onClick={() =>
+                            releaseTask.mutate({ taskId: task.id, userId: c.userId })
+                          }
+                        >
+                          <UserMinus className="h-3.5 w-3.5" aria-hidden />
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })
               )}
 
-              <div className="ml-auto flex items-center gap-2">
-                {/* Claim (open + unassigned) */}
+              {/* Claim + assign controls */}
+              <div className="mt-1 flex flex-wrap items-center gap-2">
                 <ClaimButton task={task} projectId={projectId} size="sm" />
-
-                {/* Release (assignee or manager) */}
-                {releasable && (
+                {meClaimant && (task.status === 'open' || task.status === 'in_progress') && (
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
                     loading={releaseTask.isPending}
-                    onClick={() => releaseTask.mutate(task.id)}
+                    onClick={() => releaseTask.mutate({ taskId: task.id })}
                   >
                     <UserMinus className="h-3.5 w-3.5" aria-hidden />
-                    释放
+                    退出认领
                   </Button>
                 )}
-
-                {/* Assign / dispatch (managers) */}
-                {assignable && (
+                {assignable && assignableMembers.length > 0 && task.status !== 'done' && (
                   <Select
-                    value={task.assigneeId ?? UNASSIGNED}
+                    value=""
                     onValueChange={(value) => {
-                      if (value === UNASSIGNED) {
-                        if (task.assigneeId) releaseTask.mutate(task.id);
-                      } else {
-                        assignTask.mutate({ taskId: task.id, assigneeId: value });
-                      }
+                      const m = assignableMembers.find((x) => x.userId === value);
+                      assignTask.mutate({
+                        taskId: task.id,
+                        assigneeId: value,
+                        ...(m
+                          ? {
+                              assignee: {
+                                displayName: m.user.displayName,
+                                avatarColor: m.user.avatarColor,
+                                hasAvatar: m.user.hasAvatar,
+                              },
+                            }
+                          : {}),
+                      });
                     }}
                   >
                     <SelectTrigger className="h-8 w-36 text-xs">
-                      <SelectValue placeholder="指派给…" />
+                      <span className="inline-flex items-center gap-1">
+                        <UserPlus className="h-3.5 w-3.5" aria-hidden />
+                        <SelectValue placeholder="派发给…" />
+                      </span>
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={UNASSIGNED}>不指派</SelectItem>
-                      {memberList.map((m) => (
+                      {assignableMembers.map((m) => (
                         <SelectItem key={m.userId} value={m.userId}>
                           {m.user.displayName}
                         </SelectItem>
@@ -277,8 +344,8 @@ function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Elem
             </div>
           </div>
 
-          {/* Status quick-move (editable) */}
-          {editable && (
+          {/* Status quick-move (open ↔ in_progress only; editable) */}
+          {editable && (task.status === 'open' || task.status === 'in_progress') && (
             <div className="flex items-center gap-3">
               <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">状态</span>
               <div className="flex flex-1 flex-wrap gap-1.5">
@@ -362,6 +429,15 @@ function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Elem
             删除任务
           </Button>
         </DrawerFooter>
+      )}
+
+      {showDeliver && (
+        <DeliverDialog
+          task={task}
+          projectId={projectId}
+          open={deliverOpen}
+          onOpenChange={setDeliverOpen}
+        />
       )}
     </>
   );

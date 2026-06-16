@@ -1,14 +1,24 @@
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type {
   AssignTaskInput,
   CreateTaskInput,
+  DeliverTaskInput,
+  ReviewTaskInput,
   Task,
+  TaskClaimant,
   TaskStatus,
   UpdateTaskInput,
 } from 'shared';
 import type { Database } from '../db/index.js';
-import { tasks, type TaskRow } from '../db/schema.js';
-import { conflict, forbidden, notFound } from '../lib/errors.js';
+import {
+  taskClaimants,
+  tasks,
+  users,
+  type TaskClaimantRow,
+  type TaskRow,
+  type UserRow,
+} from '../db/schema.js';
+import { conflict, forbidden, notFound, validationError } from '../lib/errors.js';
 import {
   canEditTask,
   requireProjectLead,
@@ -112,24 +122,94 @@ async function nextRankForColumn(
 // Row → wire mapping (§5 entity shape, ISO timestamps)
 // ---------------------------------------------------------------------------
 
-/** Serialize a persisted task row to the shared `Task` wire shape. */
-export function serializeTask(row: TaskRow): Task {
+/**
+ * A claimant row joined with the user's display fields, as loaded for serialization
+ * (lifecycle v2 §2). The wire shape carries only the display summary, not the full
+ * user row (§schema taskClaimantSchema).
+ */
+export interface ClaimantWithUser {
+  row: TaskClaimantRow;
+  user: Pick<UserRow, 'id' | 'displayName' | 'avatarColor' | 'avatarMime'>;
+}
+
+/** Serialize one claimant join to the shared `TaskClaimant` wire shape. */
+function serializeClaimant(c: ClaimantWithUser): TaskClaimant {
+  return {
+    userId: c.user.id,
+    displayName: c.user.displayName,
+    avatarColor: c.user.avatarColor,
+    hasAvatar: c.user.avatarMime != null,
+    points: c.row.points,
+    claimedAt: c.row.claimedAt.toISOString(),
+  };
+}
+
+/**
+ * Serialize a persisted task row to the shared `Task` wire shape (lifecycle v2 §2).
+ * Claimants are sorted by claim time so avatar stacking is stable. The deprecated
+ * single-assignee columns are never surfaced.
+ */
+export function serializeTask(row: TaskRow, claimants: ClaimantWithUser[] = []): Task {
   return {
     id: row.id,
     projectId: row.projectId,
     title: row.title,
     description: row.description,
     status: row.status,
-    assigneeId: row.assigneeId,
     points: row.points,
     priority: row.priority,
     dueDate: row.dueDate,
     createdBy: row.createdBy,
     rank: row.rank,
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-    completedBy: row.completedBy,
+    deliveredAt: row.deliveredAt ? row.deliveredAt.toISOString() : null,
+    deliveredBy: row.deliveredBy,
+    reviewedBy: row.reviewedBy,
+    claimants: [...claimants]
+      .sort((a, b) => a.row.claimedAt.getTime() - b.row.claimedAt.getTime())
+      .map(serializeClaimant),
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+/** Load the claimants (joined with their users) for a set of task ids. */
+async function loadClaimantsForTasks(
+  db: Database,
+  taskIds: string[],
+): Promise<Map<string, ClaimantWithUser[]>> {
+  const byTask = new Map<string, ClaimantWithUser[]>();
+  if (taskIds.length === 0) return byTask;
+  const rows = await db
+    .select({
+      claimant: taskClaimants,
+      userId: users.id,
+      displayName: users.displayName,
+      avatarColor: users.avatarColor,
+      avatarMime: users.avatarMime,
+    })
+    .from(taskClaimants)
+    .innerJoin(users, eq(users.id, taskClaimants.userId))
+    .where(inArray(taskClaimants.taskId, taskIds));
+  for (const r of rows) {
+    const list = byTask.get(r.claimant.taskId) ?? [];
+    list.push({
+      row: r.claimant,
+      user: {
+        id: r.userId,
+        displayName: r.displayName,
+        avatarColor: r.avatarColor,
+        avatarMime: r.avatarMime,
+      },
+    });
+    byTask.set(r.claimant.taskId, list);
+  }
+  return byTask;
+}
+
+/** Load + serialize a single task with its claimants. */
+async function serializeTaskById(db: Database, row: TaskRow): Promise<Task> {
+  const byTask = await loadClaimantsForTasks(db, [row.id]);
+  return serializeTask(row, byTask.get(row.id) ?? []);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +271,11 @@ export async function listBoardTasks(db: Database, projectId: string): Promise<T
     .from(tasks)
     .where(eq(tasks.projectId, projectId))
     .orderBy(asc(tasks.rank), asc(tasks.createdAt));
-  return rows.map(serializeTask);
+  const byTask = await loadClaimantsForTasks(
+    db,
+    rows.map((r) => r.id),
+  );
+  return rows.map((row) => serializeTask(row, byTask.get(row.id) ?? []));
 }
 
 // ---------------------------------------------------------------------------
@@ -199,9 +283,10 @@ export async function listBoardTasks(db: Database, projectId: string): Promise<T
 // ---------------------------------------------------------------------------
 
 /**
- * Create a task. Defaults to `open`/unassigned. If `assigneeId` is supplied the
- * task is dispatched on creation → `in_progress` with that assignee (§6.1, §6.2).
- * Records `created` (+ `assigned` when dispatched) and publishes a task event.
+ * Create a task. Defaults to `open` with no claimants. If `assigneeId` is supplied
+ * the task is dispatched on creation → `in_progress` with that user added as a
+ * claimant (lifecycle v2 §2/§3). Records `created` (+ `assigned` when dispatched)
+ * and publishes a task event.
  */
 export async function createTask(
   db: Database,
@@ -224,7 +309,6 @@ export async function createTask(
       title: input.title,
       description: input.description ?? null,
       status,
-      assigneeId: input.assigneeId ?? null,
       points: input.points ?? null,
       priority: input.priority,
       dueDate: input.dueDate ?? null,
@@ -235,6 +319,13 @@ export async function createTask(
 
   if (!created) {
     throw new Error('创建任务失败：未返回插入行');
+  }
+
+  if (dispatched && input.assigneeId) {
+    await db
+      .insert(taskClaimants)
+      .values({ taskId: created.id, userId: input.assigneeId })
+      .onConflictDoNothing();
   }
 
   await recordActivity(db, {
@@ -251,12 +342,12 @@ export async function createTask(
       projectId,
       actorId: actor.id,
       type: 'assigned',
-      meta: { assigneeId: created.assigneeId },
+      meta: { assigneeId: input.assigneeId },
     }, bus);
   }
 
   publishTaskChange(bus, 'created', created);
-  return serializeTask(created);
+  return serializeTaskById(db, created);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +360,7 @@ export async function getTask(
   taskId: string,
 ): Promise<Task> {
   const { task } = await loadTaskWithMembership(db, request, taskId);
-  return serializeTask(task);
+  return serializeTaskById(db, task);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,14 +368,11 @@ export async function getTask(
 // ---------------------------------------------------------------------------
 
 /**
- * Patch a task. Handles field edits, status transitions, and rank changes:
- * - moving to `done` sets `completed_at=now` and `completed_by` (current assignee,
- *   falling back to the actor) and records `completed` (§6.2).
- * - reopening (done → open|in_progress) clears `completed_at/completed_by` and
- *   records `reopened` (§6.2).
- * - other status changes record `status_changed` with {from,to}.
- * - field-only edits record `updated`.
- * Requires edit permission on the task (§6.3).
+ * Patch a task's fields / rank, plus the direct `open↔in_progress` status moves
+ * used by board drag (lifecycle v2 §3). Deliver/review own all transitions into
+ * `pending_review`/`done`, so PATCH rejects any status target other than `open`
+ * or `in_progress` (and only from `open`/`in_progress`). Records `status_changed`
+ * for a status move, else `updated`. Requires edit permission on the task (§6.3).
  */
 export async function updateTask(
   db: Database,
@@ -310,27 +398,17 @@ export async function updateTask(
   const nextStatus = input.status;
   const statusChanged = nextStatus !== undefined && nextStatus !== task.status;
 
-  // Determine the activity type for the status transition (if any).
-  let statusActivity:
-    | { type: 'completed' | 'reopened' | 'status_changed'; from: TaskStatus; to: TaskStatus }
-    | null = null;
-
   if (statusChanged) {
     const to = nextStatus as TaskStatus;
-    patch.status = to;
-    if (to === 'done') {
-      patch.completedAt = new Date();
-      // Contribution attribution: current assignee, else the operator (§6.2).
-      patch.completedBy = task.assigneeId ?? actor.id;
-      statusActivity = { type: 'completed', from: task.status, to };
-    } else if (task.status === 'done') {
-      // Reopen: clear completion attribution (§6.2).
-      patch.completedAt = null;
-      patch.completedBy = null;
-      statusActivity = { type: 'reopened', from: task.status, to };
-    } else {
-      statusActivity = { type: 'status_changed', from: task.status, to };
+    // Only the direct open↔in_progress moves are allowed via PATCH; deliver/review
+    // own the pending_review/done transitions (§3).
+    const allowed =
+      (task.status === 'open' || task.status === 'in_progress') &&
+      (to === 'open' || to === 'in_progress');
+    if (!allowed) {
+      throw validationError('该状态变更需通过交付 / 审阅完成');
     }
+    patch.status = to;
   }
 
   const [updated] = await db
@@ -343,13 +421,13 @@ export async function updateTask(
     throw notFound('任务不存在');
   }
 
-  if (statusActivity) {
+  if (statusChanged) {
     await recordActivity(db, {
       taskId,
       projectId: updated.projectId,
       actorId: actor.id,
-      type: statusActivity.type,
-      meta: { from: statusActivity.from, to: statusActivity.to },
+      type: 'status_changed',
+      meta: { from: task.status, to: nextStatus },
     }, bus);
   } else {
     // Field-only edit (incl. rank reorder).
@@ -362,19 +440,27 @@ export async function updateTask(
     }, bus);
   }
 
-  publishTaskChange(bus, statusActivity ? statusActivity.type : 'updated', updated);
-  return serializeTask(updated);
+  publishTaskChange(bus, statusChanged ? 'status_changed' : 'updated', updated);
+  return serializeTaskById(db, updated);
 }
 
 // ---------------------------------------------------------------------------
 // Claim (§6.2 POST /tasks/:id/claim)
 // ---------------------------------------------------------------------------
 
+/** The set of user ids currently claiming a task. */
+async function loadClaimantIds(db: Database, taskId: string): Promise<string[]> {
+  const rows = await db
+    .select({ userId: taskClaimants.userId })
+    .from(taskClaimants)
+    .where(eq(taskClaimants.taskId, taskId));
+  return rows.map((r) => r.userId);
+}
+
 /**
- * Claim an unassigned, open task: sets assignee=self, status=in_progress (§6.2).
- * Returns 409 if the task is already claimed/not open — the update is conditional
- * (`WHERE status='open' AND assignee IS NULL`) so concurrent claimers race safely:
- * exactly one update affects a row, the loser gets a conflict.
+ * Claim a task (lifecycle v2 §3): add the caller to the claimants set (idempotent)
+ * and, if the task is still `open`, move it to `in_progress`. Any project member
+ * may claim an `open` or `in_progress` task; a delivered/done task cannot be claimed.
  */
 export async function claimTask(
   db: Database,
@@ -385,68 +471,87 @@ export async function claimTask(
   const { task, membership } = await loadTaskWithMembership(db, request, taskId);
   const actor = membership.user;
 
-  const updatedRows = await db
-    .update(tasks)
-    .set({ assigneeId: actor.id, status: 'in_progress' })
-    .where(
-      and(
-        eq(tasks.id, taskId),
-        eq(tasks.status, 'open'),
-        // assignee must be null: an unassigned, open task.
-        isNull(tasks.assigneeId),
-      ),
-    )
-    .returning();
-
-  const updated = updatedRows[0];
-  if (!updated) {
-    // Either it wasn't open/unassigned or it vanished — distinguish for a clear msg.
-    throw conflict('任务已被认领或不可认领');
+  if (task.status !== 'open' && task.status !== 'in_progress') {
+    throw conflict('该状态的任务不可认领');
   }
 
-  await recordActivity(db, {
-    taskId,
-    projectId: task.projectId,
-    actorId: actor.id,
-    type: 'claimed',
-    meta: {},
-  }, bus);
+  // Idempotent add to the claimants set.
+  const inserted = await db
+    .insert(taskClaimants)
+    .values({ taskId, userId: actor.id })
+    .onConflictDoNothing()
+    .returning();
 
-  publishTaskChange(bus, 'claimed', updated);
-  return serializeTask(updated);
+  let updated = task;
+  if (task.status === 'open') {
+    const [row] = await db
+      .update(tasks)
+      .set({ status: 'in_progress' })
+      .where(eq(tasks.id, taskId))
+      .returning();
+    if (row) updated = row;
+  }
+
+  // Only record activity / fan out when the caller was newly added.
+  if (inserted.length > 0) {
+    await recordActivity(db, {
+      taskId,
+      projectId: task.projectId,
+      actorId: actor.id,
+      type: 'claimed',
+      meta: {},
+    }, bus);
+    publishTaskChange(bus, 'claimed', updated);
+  }
+
+  return serializeTaskById(db, updated);
 }
 
 // ---------------------------------------------------------------------------
-// Release (§6.2 POST /tasks/:id/release)
+// Release (§3 POST /tasks/:id/release)
 // ---------------------------------------------------------------------------
 
 /**
- * Release a task back to the pool: assignee=null, status=open (§6.2). Permitted to
- * the current assignee or a project lead/admin.
+ * Release a task (lifecycle v2 §3): remove a claimant from the set. The caller may
+ * remove themselves; a lead/admin may remove any claimant (via `targetUserId`). If
+ * no claimants remain the task returns to `open`.
  */
 export async function releaseTask(
   db: Database,
   bus: RealtimeBus,
   request: FastifyRequest,
   taskId: string,
+  targetUserId?: string,
 ): Promise<Task> {
   const { task, membership } = await loadTaskWithMembership(db, request, taskId);
   const actor = membership.user;
-
-  const isAssignee = task.assigneeId === actor.id;
   const isLead = membership.projectRole === 'lead' || actor.role === 'admin';
-  if (!isAssignee && !isLead) {
-    throw forbidden('只有负责人或项目负责人可以释放任务');
+
+  // Default target is the caller (self-release). Removing someone else needs lead.
+  const userId = targetUserId ?? actor.id;
+  if (userId !== actor.id && !isLead) {
+    throw forbidden('只有项目负责人可以移除他人');
   }
 
-  const [updated] = await db
-    .update(tasks)
-    .set({ assigneeId: null, status: 'open', completedAt: null, completedBy: null })
-    .where(eq(tasks.id, taskId))
+  const removed = await db
+    .delete(taskClaimants)
+    .where(and(eq(taskClaimants.taskId, taskId), eq(taskClaimants.userId, userId)))
     .returning();
 
-  if (!updated) {
-    throw notFound('任务不存在');
+  if (removed.length === 0) {
+    throw conflict('该用户不是认领者');
+  }
+
+  // If no claimants remain, drop back to the open pool (and clear deliver state).
+  const remaining = await loadClaimantIds(db, taskId);
+  let updated = task;
+  if (remaining.length === 0) {
+    const [row] = await db
+      .update(tasks)
+      .set({ status: 'open', deliveredAt: null, deliveredBy: null })
+      .where(eq(tasks.id, taskId))
+      .returning();
+    if (row) updated = row;
   }
 
   await recordActivity(db, {
@@ -454,20 +559,21 @@ export async function releaseTask(
     projectId: task.projectId,
     actorId: actor.id,
     type: 'released',
-    meta: { previousAssigneeId: task.assigneeId },
+    meta: { userId },
   }, bus);
 
   publishTaskChange(bus, 'released', updated);
-  return serializeTask(updated);
+  return serializeTaskById(db, updated);
 }
 
 // ---------------------------------------------------------------------------
-// Assign / dispatch (§6.2 POST /tasks/:id/assign)
+// Assign / dispatch (§3 POST /tasks/:id/assign)
 // ---------------------------------------------------------------------------
 
 /**
- * Dispatch a task to a member (lead/admin only). Sets the assignee and, if the
- * task is still `open`, moves it to `in_progress` (§6.2). Records `assigned`.
+ * Dispatch a task to a member (lead/admin only, lifecycle v2 §3): add the user to
+ * the claimants set and, if the task is still `open`, move it to `in_progress`.
+ * Records `assigned`.
  */
 export async function assignTask(
   db: Database,
@@ -481,28 +587,220 @@ export async function assignTask(
   const membership = await requireProjectLead(db, request, task.projectId);
   const actor = membership.user;
 
-  const nextStatus: TaskStatus = task.status === 'open' ? 'in_progress' : task.status;
+  if (task.status === 'done') {
+    throw conflict('已完成的任务不能再派发');
+  }
+
+  const inserted = await db
+    .insert(taskClaimants)
+    .values({ taskId, userId: input.assigneeId })
+    .onConflictDoNothing()
+    .returning();
+
+  let updated = task;
+  if (task.status === 'open') {
+    const [row] = await db
+      .update(tasks)
+      .set({ status: 'in_progress' })
+      .where(eq(tasks.id, taskId))
+      .returning();
+    if (row) updated = row;
+  }
+
+  if (inserted.length > 0) {
+    await recordActivity(db, {
+      taskId,
+      projectId: task.projectId,
+      actorId: actor.id,
+      type: 'assigned',
+      meta: { assigneeId: input.assigneeId },
+    }, bus);
+    publishTaskChange(bus, 'assigned', updated);
+  }
+
+  return serializeTaskById(db, updated);
+}
+
+// ---------------------------------------------------------------------------
+// Deliver (§3 POST /tasks/:id/deliver)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deliver a task for review (lifecycle v2 §3). Allowed to a claimant or a lead/admin
+ * while the task is `in_progress`. `allocations` must cover exactly the current
+ * claimant set; their points sum must equal `tasks.points` (or `totalPoints` when
+ * the task has no points yet — which is then persisted). On success the task moves
+ * to `pending_review`, `delivered_at`/`delivered_by` are set, and each claimant's
+ * share is written. Records `delivered`.
+ */
+export async function deliverTask(
+  db: Database,
+  bus: RealtimeBus,
+  request: FastifyRequest,
+  taskId: string,
+  input: DeliverTaskInput,
+): Promise<Task> {
+  const { task, membership } = await loadTaskWithMembership(db, request, taskId);
+  const actor = membership.user;
+  const isLead = membership.projectRole === 'lead' || actor.role === 'admin';
+
+  if (task.status !== 'in_progress') {
+    throw conflict('只有进行中的任务可以交付');
+  }
+
+  const claimantIds = await loadClaimantIds(db, taskId);
+  if (claimantIds.length === 0) {
+    throw validationError('任务还没有认领者，无法交付');
+  }
+
+  const isClaimant = claimantIds.includes(actor.id);
+  if (!isClaimant && !isLead) {
+    throw forbidden('只有认领者或项目负责人可以交付');
+  }
+
+  // Allocations must cover exactly the current claimant set, one entry per user.
+  const claimantSet = new Set(claimantIds);
+  const seen = new Set<string>();
+  for (const a of input.allocations) {
+    if (!claimantSet.has(a.userId)) {
+      throw validationError('分配中包含非认领者');
+    }
+    if (seen.has(a.userId)) {
+      throw validationError('每个认领者只能分配一次');
+    }
+    seen.add(a.userId);
+  }
+  if (seen.size !== claimantSet.size) {
+    throw validationError('分配必须覆盖所有认领者');
+  }
+
+  const sum = input.allocations.reduce((acc, a) => acc + a.points, 0);
+  // Target total: the task points, or the supplied totalPoints when unset.
+  let total: number;
+  if (task.points != null) {
+    total = task.points;
+  } else {
+    if (input.totalPoints == null) {
+      throw validationError('任务没有点数，请提供总点数');
+    }
+    total = input.totalPoints;
+  }
+  if (sum !== total) {
+    throw validationError('分配点数之和必须等于总点数');
+  }
+
+  // Persist: task → pending_review + deliver metadata (+ points if it was unset).
+  const taskPatch: Partial<TaskRow> = {
+    status: 'pending_review',
+    deliveredAt: new Date(),
+    deliveredBy: actor.id,
+  };
+  if (task.points == null) taskPatch.points = total;
 
   const [updated] = await db
     .update(tasks)
-    .set({ assigneeId: input.assigneeId, status: nextStatus })
+    .set(taskPatch)
     .where(eq(tasks.id, taskId))
     .returning();
-
   if (!updated) {
     throw notFound('任务不存在');
+  }
+
+  // Write each claimant's share.
+  for (const a of input.allocations) {
+    await db
+      .update(taskClaimants)
+      .set({ points: a.points })
+      .where(and(eq(taskClaimants.taskId, taskId), eq(taskClaimants.userId, a.userId)));
   }
 
   await recordActivity(db, {
     taskId,
     projectId: task.projectId,
     actorId: actor.id,
-    type: 'assigned',
-    meta: { assigneeId: input.assigneeId, previousAssigneeId: task.assigneeId },
+    type: 'delivered',
+    meta: { totalPoints: total },
   }, bus);
 
-  publishTaskChange(bus, 'assigned', updated);
-  return serializeTask(updated);
+  publishTaskChange(bus, 'delivered', updated);
+  return serializeTaskById(db, updated);
+}
+
+// ---------------------------------------------------------------------------
+// Review (§3 POST /tasks/:id/review)
+// ---------------------------------------------------------------------------
+
+/**
+ * Review a delivered task (lifecycle v2 §3, lead/admin only; task must be
+ * `pending_review`). `approve` → `done` with `completed_at`/`reviewed_by` set (the
+ * shares stay locked) and records `completed`. `reject` → `in_progress`, clears
+ * `delivered_at`/`delivered_by` and every claimant's points, sets `reviewed_by`,
+ * and records `rejected` (the optional `comment` is the rejection reason).
+ */
+export async function reviewTask(
+  db: Database,
+  bus: RealtimeBus,
+  request: FastifyRequest,
+  taskId: string,
+  input: ReviewTaskInput,
+): Promise<Task> {
+  const task = await loadTask(db, taskId);
+  // Lead/admin only.
+  const membership = await requireProjectLead(db, request, task.projectId);
+  const actor = membership.user;
+
+  if (task.status !== 'pending_review') {
+    throw conflict('只有待审阅的任务可以审阅');
+  }
+
+  if (input.decision === 'approve') {
+    const [updated] = await db
+      .update(tasks)
+      .set({ status: 'done', completedAt: new Date(), reviewedBy: actor.id })
+      .where(eq(tasks.id, taskId))
+      .returning();
+    if (!updated) throw notFound('任务不存在');
+
+    await recordActivity(db, {
+      taskId,
+      projectId: task.projectId,
+      actorId: actor.id,
+      type: 'completed',
+      meta: {},
+    }, bus);
+
+    publishTaskChange(bus, 'completed', updated);
+    return serializeTaskById(db, updated);
+  }
+
+  // reject → back to in_progress; clear deliver state + each claimant's share.
+  const [updated] = await db
+    .update(tasks)
+    .set({
+      status: 'in_progress',
+      deliveredAt: null,
+      deliveredBy: null,
+      reviewedBy: actor.id,
+    })
+    .where(eq(tasks.id, taskId))
+    .returning();
+  if (!updated) throw notFound('任务不存在');
+
+  await db
+    .update(taskClaimants)
+    .set({ points: null })
+    .where(eq(taskClaimants.taskId, taskId));
+
+  await recordActivity(db, {
+    taskId,
+    projectId: task.projectId,
+    actorId: actor.id,
+    type: 'rejected',
+    meta: input.comment ? { comment: input.comment } : {},
+  }, bus);
+
+  publishTaskChange(bus, 'rejected', updated);
+  return serializeTaskById(db, updated);
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import {
   assignTaskInputSchema,
   createTaskInputSchema,
+  deliverTaskInputSchema,
   idParamSchema,
+  releaseTaskInputSchema,
+  reviewTaskInputSchema,
   updateTaskInputSchema,
   type BoardResponse,
   type CreateTaskInput,
@@ -16,9 +19,11 @@ import {
   claimTask,
   createTask,
   deleteTask,
+  deliverTask,
   getTask,
   listBoardTasks,
   releaseTask,
+  reviewTask,
   updateTask,
 } from '../services/taskService.js';
 
@@ -80,18 +85,35 @@ const tasksRoutes: FastifyPluginAsync = async (fastify) => {
     return { task };
   });
 
-  // POST /tasks/:id/release — release back to the pool (§6.2).
+  // POST /tasks/:id/release — remove a claimant (self, or another via lead) (v2 §3).
   fastify.post('/tasks/:id/release', async (request): Promise<TaskResponse> => {
     const { id } = parseParams(idParamSchema, request.params);
-    const task = await releaseTask(db, bus, request, id);
+    const { userId } = parseBody(releaseTaskInputSchema, request.body ?? {});
+    const task = await releaseTask(db, bus, request, id, userId);
     return { task };
   });
 
-  // POST /tasks/:id/assign — lead/admin dispatch (§6.2).
+  // POST /tasks/:id/assign — lead/admin dispatch (§6.2, v2 §3).
   fastify.post('/tasks/:id/assign', async (request): Promise<TaskResponse> => {
     const { id } = parseParams(idParamSchema, request.params);
     const input = parseBody(assignTaskInputSchema, request.body);
     const task = await assignTask(db, bus, request, id, input);
+    return { task };
+  });
+
+  // POST /tasks/:id/deliver — claimant/lead submits points split for review (v2 §3).
+  fastify.post('/tasks/:id/deliver', async (request): Promise<TaskResponse> => {
+    const { id } = parseParams(idParamSchema, request.params);
+    const input = parseBody(deliverTaskInputSchema, request.body);
+    const task = await deliverTask(db, bus, request, id, input);
+    return { task };
+  });
+
+  // POST /tasks/:id/review — lead/admin approve/reject a delivered task (v2 §3).
+  fastify.post('/tasks/:id/review', async (request): Promise<TaskResponse> => {
+    const { id } = parseParams(idParamSchema, request.params);
+    const input = parseBody(reviewTaskInputSchema, request.body);
+    const task = await reviewTask(db, bus, request, id, input);
     return { task };
   });
 
