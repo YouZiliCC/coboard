@@ -1,7 +1,8 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type {
   CreateProjectInput,
   Project,
+  ProjectDirectoryItem,
   ProjectMemberWithUser,
   ProjectRole,
   UpdateProjectInput,
@@ -124,6 +125,60 @@ export async function listProjectMembers(
     .where(eq(projectMembers.projectId, projectId))
     .orderBy(asc(projectMembers.createdAt));
   return rows.map((r) => presentMember(r.member, r.user));
+}
+
+/**
+ * Browsable directory of every non-archived project (self-service join/leave).
+ * Unlike {@link listVisibleProjects}, any logged-in user sees all open projects;
+ * each item carries whether the caller is already a member and the project's total
+ * member count. Assembled from three flat queries (projects, the caller's
+ * membership ids, grouped member counts) to avoid an N+1 over projects. Ordered by
+ * name ascending for a stable, scannable list.
+ */
+export async function listProjectDirectory(
+  db: Database,
+  userId: string,
+): Promise<ProjectDirectoryItem[]> {
+  const projectRows = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.archived, false))
+    .orderBy(asc(projects.name));
+
+  if (projectRows.length === 0) {
+    return [];
+  }
+
+  const projectIds = projectRows.map((p) => p.id);
+
+  // The caller's memberships among these projects.
+  const myMemberships = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.userId, userId),
+        inArray(projectMembers.projectId, projectIds),
+      ),
+    );
+  const memberOf = new Set(myMemberships.map((m) => m.projectId));
+
+  // Total member count per project, grouped in a single query.
+  const counts = await db
+    .select({
+      projectId: projectMembers.projectId,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(projectMembers)
+    .where(inArray(projectMembers.projectId, projectIds))
+    .groupBy(projectMembers.projectId);
+  const countByProject = new Map(counts.map((c) => [c.projectId, c.count]));
+
+  return projectRows.map((row) => ({
+    ...presentProject(row),
+    isMember: memberOf.has(row.id),
+    memberCount: countByProject.get(row.id) ?? 0,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +320,33 @@ export async function addProjectMember(
 }
 
 /**
+ * Last-lead invariant (§6.3): a project must never lose its only remaining lead,
+ * or it becomes unmanageable. Call before removing a membership row; throws the
+ * given AppError when `member` is the project's sole lead. Reused by both
+ * lead/admin removal and self-service leave.
+ */
+async function assertNotLastLead(
+  db: Database,
+  projectId: string,
+  member: ProjectMemberRow,
+  error: ReturnType<typeof forbidden>,
+): Promise<void> {
+  if (member.role !== 'lead') return;
+  const leads = await db
+    .select({ id: projectMembers.id })
+    .from(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.role, 'lead'),
+      ),
+    );
+  if (leads.length <= 1) {
+    throw error;
+  }
+}
+
+/**
  * Remove a user from a project (§6.3 / §7). Refuses to remove the project's last
  * lead so a project can never become unmanageable. A non-member yields a 404.
  */
@@ -287,20 +369,111 @@ export async function removeProjectMember(
     throw notFound('该用户不是项目成员');
   }
 
-  if (member.role === 'lead') {
-    const leads = await db
-      .select({ id: projectMembers.id })
-      .from(projectMembers)
-      .where(
-        and(
-          eq(projectMembers.projectId, projectId),
-          eq(projectMembers.role, 'lead'),
-        ),
-      );
-    if (leads.length <= 1) {
-      throw forbidden('不能移除项目唯一的负责人');
-    }
+  await assertNotLastLead(db, projectId, member, forbidden('不能移除项目唯一的负责人'));
+
+  await db
+    .delete(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.userId, userId),
+      ),
+    );
+
+  publishChange({
+    type: 'updated',
+    projectId,
+    entity: 'project',
+    payload: { projectId, userId },
+  });
+}
+
+/**
+ * Self-service join (§6.3): any logged-in user adds themselves to a non-archived
+ * project as a plain `member`. Idempotent — if a membership row already exists it
+ * is left UNCHANGED (an existing `lead` is never downgraded). A missing or
+ * archived project yields a 404.
+ */
+export async function joinProject(
+  db: Database,
+  userId: string,
+  projectId: string,
+): Promise<void> {
+  const [project] = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  if (!project || project.archived) {
+    throw notFound('项目不存在');
   }
+
+  const [existing] = await db
+    .select({ id: projectMembers.id })
+    .from(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.userId, userId),
+      ),
+    )
+    .limit(1);
+  if (existing) {
+    // Already a member — leave their role untouched and return idempotently.
+    return;
+  }
+
+  try {
+    await db
+      .insert(projectMembers)
+      .values({ projectId, userId, role: 'member' });
+  } catch (error) {
+    // A concurrent join can race past the existence check; treat the unique
+    // violation as the same idempotent success.
+    if (!isUniqueViolation(error)) {
+      throw error;
+    }
+    return;
+  }
+
+  publishChange({
+    type: 'updated',
+    projectId,
+    entity: 'project',
+    payload: { projectId, userId },
+  });
+}
+
+/**
+ * Self-service leave (§6.3): a user removes their own membership. A non-member
+ * yields a 404; if they are the project's only remaining lead the leave is refused
+ * with a 409 (they must hand off the lead role first).
+ */
+export async function leaveProject(
+  db: Database,
+  userId: string,
+  projectId: string,
+): Promise<void> {
+  const [member] = await db
+    .select()
+    .from(projectMembers)
+    .where(
+      and(
+        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.userId, userId),
+      ),
+    )
+    .limit(1);
+  if (!member) {
+    throw notFound('你不是该项目成员');
+  }
+
+  await assertNotLastLead(
+    db,
+    projectId,
+    member,
+    conflict('项目至少需要一名负责人，请先指派他人'),
+  );
 
   await db
     .delete(projectMembers)

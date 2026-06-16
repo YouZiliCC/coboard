@@ -38,6 +38,7 @@ export const queryKeys = {
   me: () => ['auth', 'me'] as const,
   users: () => ['users'] as const,
   projects: () => ['projects'] as const,
+  projectDirectory: () => ['projects', 'directory'] as const,
   project: (projectId: string) => ['projects', projectId] as const,
   projectMembers: (projectId: string) => ['projects', projectId, 'members'] as const,
   board: (projectId: string) => ['projects', projectId, 'tasks'] as const,

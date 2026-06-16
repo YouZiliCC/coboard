@@ -5,6 +5,7 @@ import {
   idParamSchema,
   projectMemberParamsSchema,
   updateProjectInputSchema,
+  type ProjectDirectoryResponse,
   type ProjectMembersResponse,
   type ProjectsListResponse,
 } from 'shared';
@@ -18,6 +19,9 @@ import { parseBody, parseParams } from '../lib/validate.js';
 import {
   addProjectMember,
   createProject,
+  joinProject,
+  leaveProject,
+  listProjectDirectory,
   listProjectMembers,
   listVisibleProjects,
   removeProjectMember,
@@ -31,8 +35,11 @@ import {
  * mutation rules live in the guards + service.
  *
  *   GET    /projects                       — projects I can see (admin: all)
+ *   GET    /projects/directory             — any user; all non-archived projects
  *   POST   /projects                       — admin; auto-adds creator as lead
  *   PATCH  /projects/:id                   — lead/admin; rename/describe/archive
+ *   POST   /projects/:id/join              — any user; self-join as member
+ *   POST   /projects/:id/leave             — any user; self-leave
  *   GET    /projects/:id/members           — project members (member-visible)
  *   POST   /projects/:id/members           — lead/admin; add a user with a role
  *   DELETE /projects/:id/members/:userId   — lead/admin; remove a member
@@ -46,6 +53,18 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     const projects = await listVisibleProjects(db, user);
     return { projects };
   });
+
+  // Browsable directory of all non-archived projects (any logged-in user).
+  // Registered ahead of the `/projects/:id`-style routes; Fastify matches this
+  // static path before the parametric ones, and there is no `GET /projects/:id`.
+  fastify.get(
+    '/projects/directory',
+    async (request): Promise<ProjectDirectoryResponse> => {
+      const user = requireAuth(request);
+      const projects = await listProjectDirectory(db, user.id);
+      return { projects };
+    },
+  );
 
   // Create a project (admin only); the creator becomes its lead.
   fastify.post('/projects', async (request, reply) => {
@@ -62,6 +81,22 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     const input = parseBody(updateProjectInputSchema, request.body);
     const project = await updateProject(db, id, input);
     return { project };
+  });
+
+  // Self-join a project as a member (any logged-in user); idempotent.
+  fastify.post('/projects/:id/join', async (request) => {
+    const user = requireAuth(request);
+    const { id } = parseParams(idParamSchema, request.params);
+    await joinProject(db, user.id, id);
+    return { ok: true };
+  });
+
+  // Self-leave a project (any logged-in user); 409 if sole remaining lead.
+  fastify.post('/projects/:id/leave', async (request) => {
+    const user = requireAuth(request);
+    const { id } = parseParams(idParamSchema, request.params);
+    await leaveProject(db, user.id, id);
+    return { ok: true };
   });
 
   // List a project's members; any member (or admin) may view.

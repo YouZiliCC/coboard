@@ -327,6 +327,24 @@ export const projectsListResponseSchema = z.object({
 });
 export type ProjectsListResponse = z.infer<typeof projectsListResponseSchema>;
 
+/**
+ * A project as shown in the self-service directory (GET /projects/directory):
+ * the project plus whether the current user is already a member and how many
+ * members it has. Any logged-in user can browse the directory and join/leave.
+ */
+export const projectDirectoryItemSchema = projectSchema.extend({
+  isMember: z.boolean(),
+  memberCount: z.number().int().nonnegative(),
+});
+export type ProjectDirectoryItem = z.infer<typeof projectDirectoryItemSchema>;
+
+export const projectDirectoryResponseSchema = z.object({
+  projects: z.array(projectDirectoryItemSchema),
+});
+export type ProjectDirectoryResponse = z.infer<
+  typeof projectDirectoryResponseSchema
+>;
+
 /** POST /projects (admin). */
 export const createProjectInputSchema = z.object({
   name: z.string().trim().min(1, '项目名称不能为空').max(120),

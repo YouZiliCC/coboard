@@ -9,6 +9,8 @@ import type {
   AddProjectMemberInput,
   CreateProjectInput,
   Project,
+  ProjectDirectoryItem,
+  ProjectDirectoryResponse,
   ProjectMembersResponse,
   ProjectMemberWithUser,
   ProjectsListResponse,
@@ -48,6 +50,12 @@ export const projectsApi = {
     api.post<ProjectResponse>('/projects', input),
   update: (id: string, input: UpdateProjectInput): Promise<ProjectResponse> =>
     api.patch<ProjectResponse>(`/projects/${id}`, input),
+  directory: (signal?: AbortSignal): Promise<ProjectDirectoryResponse> =>
+    api.get<ProjectDirectoryResponse>('/projects/directory', { signal }),
+  join: (id: string): Promise<{ ok: boolean }> =>
+    api.post<{ ok: boolean }>(`/projects/${id}/join`),
+  leave: (id: string): Promise<{ ok: boolean }> =>
+    api.post<{ ok: boolean }>(`/projects/${id}/leave`),
   members: (id: string, signal?: AbortSignal): Promise<ProjectMembersResponse> =>
     api.get<ProjectMembersResponse>(`/projects/${id}/members`, { signal }),
   addMember: (id: string, input: AddProjectMemberInput): Promise<ProjectMembersResponse> =>
@@ -80,6 +88,21 @@ export function useProject(projectId: string | undefined): UseQueryResult<Projec
     },
     enabled: projectId !== undefined,
     select: (projects) => projects.find((p) => p.id === projectId),
+  });
+}
+
+/**
+ * Self-service project directory — every non-archived project, each flagged with
+ * whether the current user is a member and its member count (§7 GET
+ * /projects/directory). Powers the browsable 项目 page where any user can join/leave.
+ */
+export function useProjectDirectory(): UseQueryResult<ProjectDirectoryItem[]> {
+  return useQuery<ProjectDirectoryItem[]>({
+    queryKey: queryKeys.projectDirectory(),
+    queryFn: async ({ signal }) => {
+      const res = await projectsApi.directory(signal);
+      return res.projects;
+    },
   });
 }
 
@@ -177,5 +200,40 @@ export function useRemoveProjectMember(): UseMutationResult<void, Error, RemoveM
       void queryClient.invalidateQueries({ queryKey: queryKeys.projectMembers(projectId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Self-service join / leave (§6.3, §7) — affect only the current user
+// ---------------------------------------------------------------------------
+
+/**
+ * Refresh both the caller's own project list (powers the switcher/board nav) and
+ * the directory after a self-join/leave changes membership.
+ */
+function invalidateMembershipQueries(queryClient: ReturnType<typeof useQueryClient>): void {
+  void queryClient.invalidateQueries({ queryKey: queryKeys.projects() });
+  void queryClient.invalidateQueries({ queryKey: queryKeys.projectDirectory() });
+}
+
+/** Self-join a project as a member — §7 POST /projects/:id/join. */
+export function useJoinProject(): UseMutationResult<void, Error, string> {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: async (projectId) => {
+      await projectsApi.join(projectId);
+    },
+    onSuccess: () => invalidateMembershipQueries(queryClient),
+  });
+}
+
+/** Self-leave a project — §7 POST /projects/:id/leave (409 if sole lead). */
+export function useLeaveProject(): UseMutationResult<void, Error, string> {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: async (projectId) => {
+      await projectsApi.leave(projectId);
+    },
+    onSuccess: () => invalidateMembershipQueries(queryClient),
   });
 }

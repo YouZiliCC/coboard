@@ -21,6 +21,7 @@ import SetupPage from './pages/Setup';
 import LoginPage from './pages/Login';
 import RegisterPage from './pages/Register';
 import BoardPage from './pages/BoardPage';
+import ProjectsPage from './pages/ProjectsPage';
 import StatsPage from './pages/StatsPage';
 import AdminPage from './pages/AdminPage';
 import AccountProfilePage from './pages/AccountProfile';
@@ -104,6 +105,7 @@ function AuthedRoutes(): JSX.Element {
       <Routes>
         <Route path="/" element={<HomeRedirect />} />
         <Route path="/board/:projectId" element={<BoardPage />} />
+        <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/stats" element={<StatsPage />} />
         <Route
           path="/admin"
