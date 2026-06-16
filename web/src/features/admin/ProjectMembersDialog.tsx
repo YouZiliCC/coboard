@@ -45,7 +45,7 @@ export function ProjectMembersDialog({
 }): JSX.Element {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>管理成员 · {project.name}</DialogTitle>
           <DialogDescription>添加成员、设置负责人/成员角色或移除成员。</DialogDescription>
@@ -123,8 +123,8 @@ function MembersBody({ project }: { project: Project }): JSX.Element {
 
   return (
     <div className="space-y-4">
-      {/* Add member row */}
-      <div className="flex items-end gap-2 rounded-lg border border-border bg-secondary/30 p-3">
+      {/* Add member row — stacks on phones, inline on sm+ */}
+      <div className="flex flex-col gap-2 rounded-lg border border-border bg-secondary/30 p-3 sm:flex-row sm:items-end">
         <div className="grid flex-1 gap-1.5">
           <label className="text-xs font-medium text-muted-foreground" htmlFor="add-member-user">
             添加成员
@@ -142,7 +142,7 @@ function MembersBody({ project }: { project: Project }): JSX.Element {
             </SelectContent>
           </Select>
         </div>
-        <div className="grid w-28 gap-1.5">
+        <div className="grid gap-1.5 sm:w-28">
           <label className="text-xs font-medium text-muted-foreground" htmlFor="add-member-role">
             角色
           </label>

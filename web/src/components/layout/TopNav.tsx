@@ -58,7 +58,7 @@ export function TopNav(): JSX.Element {
 
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
-      <div className="flex h-14 items-center gap-4 px-4 sm:px-6">
+      <div className="flex h-14 items-center gap-2 px-4 sm:gap-4 sm:px-6">
         {/* Logo */}
         <Link to="/" className="flex items-center gap-2" aria-label="Coboard 首页">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">

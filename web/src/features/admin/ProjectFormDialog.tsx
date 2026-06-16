@@ -136,7 +136,7 @@ function CreateProjectDialog({
           新建项目
         </Button>
       )}
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>新建项目</DialogTitle>
           <DialogDescription>项目用于组织看板、任务与成员。标识创建后不可修改。</DialogDescription>
@@ -275,7 +275,7 @@ function EditProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>编辑项目</DialogTitle>
           <DialogDescription>

@@ -41,7 +41,13 @@ export function Column({
 
   return (
     <section
-      className="flex h-full min-w-0 flex-1 flex-col rounded-xl bg-secondary/40"
+      className={cn(
+        // Mobile: each column is a fixed, comfortable width that overflows the
+        // viewport so the board scrolls horizontally (one column snaps into view
+        // at a time). md+: restore equal full-width flex columns for desktop.
+        'flex h-full w-[82vw] max-w-[20rem] shrink-0 snap-start flex-col rounded-xl bg-secondary/40',
+        'md:w-auto md:max-w-none md:flex-1 md:shrink md:snap-align-none',
+      )}
       aria-label={STATUS_LABELS[status]}
     >
       <header className="flex items-center gap-2 px-3 py-2.5">

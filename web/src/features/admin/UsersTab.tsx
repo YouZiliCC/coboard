@@ -112,14 +112,14 @@ export function UsersTab(): JSX.Element {
           action={<CreateUserDialog />}
         />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-border bg-card">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <table className="w-full min-w-[34rem] text-sm">
             <thead>
               <tr className="border-b border-border bg-secondary/40 text-left text-xs font-medium text-muted-foreground">
                 <th className="px-4 py-2.5">成员</th>
                 <th className="px-4 py-2.5">角色</th>
                 <th className="px-4 py-2.5">状态</th>
-                <th className="px-4 py-2.5">所属项目</th>
+                <th className="hidden px-4 py-2.5 md:table-cell">所属项目</th>
                 <th className="hidden px-4 py-2.5 sm:table-cell">创建时间</th>
                 <th className="px-4 py-2.5 text-right">操作</th>
               </tr>
@@ -167,7 +167,7 @@ export function UsersTab(): JSX.Element {
                         <Badge variant="outline">已停用</Badge>
                       )}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="hidden px-4 py-3 md:table-cell">
                       {u.projects.length === 0 ? (
                         <Badge variant="warning">未加入任何项目</Badge>
                       ) : (

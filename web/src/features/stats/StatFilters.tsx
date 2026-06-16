@@ -109,13 +109,13 @@ export function StatFilters({ value, onChange }: StatFiltersProps): JSX.Element 
 
       {/* Custom range inputs — only when 自定义 is selected */}
       {value.range === 'custom' && (
-        <div className="flex items-end gap-2">
-          <div className="flex flex-col gap-1.5">
+        <div className="flex w-full items-end gap-2 sm:w-auto">
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-none">
             <Label htmlFor="stat-from">起</Label>
             <Input
               id="stat-from"
               type="date"
-              className="w-[9.5rem]"
+              className="w-full sm:w-[9.5rem]"
               value={value.customFrom}
               max={value.customTo || undefined}
               onChange={(e) => patch({ customFrom: e.target.value })}
@@ -124,12 +124,12 @@ export function StatFilters({ value, onChange }: StatFiltersProps): JSX.Element 
           <span className="pb-2 text-muted-foreground" aria-hidden>
             —
           </span>
-          <div className="flex flex-col gap-1.5">
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-none">
             <Label htmlFor="stat-to">止</Label>
             <Input
               id="stat-to"
               type="date"
-              className="w-[9.5rem]"
+              className="w-full sm:w-[9.5rem]"
               value={value.customTo}
               min={value.customFrom || undefined}
               onChange={(e) => patch({ customTo: e.target.value })}

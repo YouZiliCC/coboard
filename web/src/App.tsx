@@ -12,7 +12,6 @@ import { queryClient } from './lib/query';
 import { AuthProvider, useAuth } from './lib/auth-context';
 import { RealtimeListener } from './lib/sse';
 import { useSetupStatus } from './api/setup';
-import { useProjects } from './api/projects';
 import { AppShell } from './components/layout/AppShell';
 import { TooltipProvider } from './components/ui';
 import { FullPageSpinner } from './components/ui/Spinner';
@@ -86,18 +85,9 @@ function PublicOnly({ children }: { children: ReactNode }): JSX.Element {
   return <>{children}</>;
 }
 
-/** Index route: redirect to the first visible (non-archived) project's board. */
+/** Index route: the board defaults to the All-Projects view (§8). */
 function HomeRedirect(): JSX.Element {
-  const { data: projects, isLoading } = useProjects();
-  if (isLoading) {
-    return <FullPageSpinner />;
-  }
-  const first = projects?.find((p) => !p.archived) ?? projects?.[0];
-  if (first) {
-    return <Navigate to={`/board/${first.id}`} replace />;
-  }
-  // No projects visible yet — land on stats (a safe, always-available page).
-  return <Navigate to="/stats" replace />;
+  return <Navigate to="/board/all" replace />;
 }
 
 function AuthedRoutes(): JSX.Element {

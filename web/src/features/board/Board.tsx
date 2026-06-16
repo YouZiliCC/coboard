@@ -4,6 +4,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  TouchSensor,
   KeyboardSensor,
   closestCorners,
   useSensor,
@@ -82,8 +83,13 @@ export function Board({
   const [hint, setHint] = useState<string | null>(null);
 
   const sensors = useSensors(
-    // 5px activation distance lets a click open the drawer without starting a drag.
+    // Mouse/pen: a 5px activation distance lets a click open the drawer without
+    // starting a drag.
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    // Touch: require a short press-and-hold before a drag begins so a plain swipe
+    // scrolls the board (horizontally across columns, vertically within one) while
+    // a deliberate hold still picks up a card.
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
@@ -274,7 +280,7 @@ export function Board({
           onDragEnd={handleDragEnd}
           onDragCancel={() => setActiveId(null)}
         >
-          <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto px-4 pb-4 sm:px-6">
+          <div className="flex min-h-0 flex-1 snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-4 sm:px-6 md:snap-none">
             {COLUMN_ORDER.map((status) => (
               <Column
                 key={status}

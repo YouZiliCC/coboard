@@ -43,7 +43,12 @@ export const DialogContent = forwardRef<
       <DialogPrimitive.Content
         ref={ref}
         className={cn(
-          'fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4',
+          'fixed left-1/2 top-1/2 z-50 grid w-full -translate-x-1/2 -translate-y-1/2 gap-4',
+          // Mobile-first: a side inset so the dialog never touches the phone edges;
+          // sm+ restores the comfortable max width (consumers may override sm:max-w-*).
+          'max-w-[calc(100vw-2rem)] sm:max-w-lg',
+          // Cap the height with internal scroll so tall dialogs stay usable on short screens.
+          'max-h-[calc(100vh-2rem)] overflow-y-auto',
           'rounded-xl border border-border bg-card p-6 text-card-foreground shadow-xl',
           'animate-content-in',
           className,

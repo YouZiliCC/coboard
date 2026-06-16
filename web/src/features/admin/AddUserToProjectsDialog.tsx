@@ -39,7 +39,7 @@ export function AddUserToProjectsDialog({
 }): JSX.Element {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>把 {user.displayName} 加入项目</DialogTitle>
           <DialogDescription>勾选项目并选择角色，一次性把该成员加入多个项目。</DialogDescription>

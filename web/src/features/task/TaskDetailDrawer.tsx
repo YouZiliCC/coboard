@@ -180,7 +180,7 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
   return (
     <>
       <DrawerHeader className="flex flex-row items-center justify-between gap-2 pr-4">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Badge variant={statusVariant}>{STATUS_LABELS[task.status]}</Badge>
           <Badge variant={PRIORITY_BADGE[task.priority].variant} className="gap-1">
             <span
@@ -572,7 +572,7 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
           onChange={(e) => setDescription(e.target.value)}
         />
       </div>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="grid gap-1.5">
           <Label>优先级</Label>
           <Select value={priority} onValueChange={(v) => setPriority(v as Priority)}>

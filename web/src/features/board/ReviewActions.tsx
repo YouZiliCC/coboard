@@ -91,7 +91,7 @@ export function ReviewActions({
       </div>
 
       <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>驳回交付</DialogTitle>
             <DialogDescription>

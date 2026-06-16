@@ -160,7 +160,7 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
           新建任务
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>新建任务</DialogTitle>
           <DialogDescription>
@@ -217,7 +217,7 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label>优先级</Label>
               <Select value={priority} onValueChange={(v) => setValue('priority', v as Priority)}>
@@ -247,7 +247,7 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label htmlFor="task-due">截止日期（选填）</Label>
               <Input id="task-due" type="date" {...register('dueDate')} />

@@ -127,7 +127,7 @@ export function DeliverDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>交付任务</DialogTitle>
           <DialogDescription>

@@ -107,7 +107,7 @@ export function CreateUserDialog(): JSX.Element {
         <UserPlus className="h-4 w-4" aria-hidden />
         新建账号
       </Button>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>新建账号</DialogTitle>
           <DialogDescription>
