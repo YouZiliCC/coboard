@@ -54,10 +54,8 @@
   body,
   #root {
     height: 100%;
-    /* Dynamic viewport height excludes the mobile browser address bar, so the
-       app fits the VISIBLE area exactly and the document itself never scrolls
-       (inner regions own their own scroll). 100% is the fallback. */
-    height: 100dvh;
+    /* The document itself never scrolls — the app shell is fixed to the viewport
+       (see AppShell) and inner regions own their own scroll. */
     overflow: hidden;
   }
 
