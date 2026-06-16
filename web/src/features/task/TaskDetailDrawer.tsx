@@ -79,26 +79,29 @@ const PRIORITIES: Priority[] = ['low', 'medium', 'high', 'urgent'];
 /** Only the direct board moves are PATCHable; deliver/review own the rest (§3). */
 const STATUSES = ['open', 'in_progress'] as const;
 
+type Tab = 'comments' | 'ideas' | 'activity';
+
 export interface TaskDetailDrawerProps {
   taskId: string | null;
   projectId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Which tab to open initially (defaults to 评论). */
+  initialTab?: Tab;
 }
-
-type Tab = 'comments' | 'ideas' | 'activity';
 
 export function TaskDetailDrawer({
   taskId,
   projectId,
   open,
   onOpenChange,
+  initialTab,
 }: TaskDetailDrawerProps): JSX.Element {
   return (
     <Drawer open={open} onOpenChange={onOpenChange}>
       <DrawerContent widthClassName="w-full sm:max-w-2xl" className="gap-0 p-0" hideClose>
         {taskId ? (
-          <DrawerInner taskId={taskId} projectId={projectId} onClose={() => onOpenChange(false)} />
+          <DrawerInner taskId={taskId} projectId={projectId} initialTab={initialTab} onClose={() => onOpenChange(false)} />
         ) : (
           <div className="flex h-full items-center justify-center">
             <Spinner />
@@ -112,10 +115,11 @@ export function TaskDetailDrawer({
 interface DrawerInnerProps {
   taskId: string;
   projectId: string;
+  initialTab?: Tab;
   onClose: () => void;
 }
 
-function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Element {
+function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProps): JSX.Element {
   const { user } = useAuth();
   const { data: task, isLoading } = useTask(taskId);
   const { data: members } = useProjectMembers(projectId);
@@ -128,7 +132,7 @@ function DrawerInner({ taskId, projectId, onClose }: DrawerInnerProps): JSX.Elem
   const releaseTask = useReleaseTask(projectId, user?.id);
   const deleteTask = useDeleteTask(projectId);
 
-  const [tab, setTab] = useState<Tab>('comments');
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'comments');
   const [editing, setEditing] = useState(false);
   const [deliverOpen, setDeliverOpen] = useState(false);
 

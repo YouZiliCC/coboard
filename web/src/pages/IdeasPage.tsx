@@ -114,6 +114,7 @@ export default function IdeasPage(): JSX.Element {
         taskId={selected?.taskId ?? null}
         projectId={selected?.projectId ?? ''}
         open={selected !== null}
+        initialTab="ideas"
         onOpenChange={(o) => {
           if (!o) setSelected(null);
         }}
