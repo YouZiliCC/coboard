@@ -140,7 +140,7 @@ function FileRow({
       <a
         href={taskFileUrl(taskId, file.id)}
         download={file.filename}
-        className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
         aria-label={`下载 ${file.filename}`}
       >
         <Download className="h-3.5 w-3.5" aria-hidden />
@@ -151,7 +151,7 @@ function FileRow({
           type="button"
           variant="ghost"
           size="icon"
-          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
           aria-label={`删除 ${file.filename}`}
           loading={deleteFile.isPending}
           onClick={() => {
