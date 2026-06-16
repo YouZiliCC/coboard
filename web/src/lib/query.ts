@@ -48,6 +48,8 @@ export const queryKeys = {
    * `projectId`) operate on this cache when the board is in all-projects mode.
    */
   allTasks: () => ['projects', 'all', 'tasks'] as const,
+  /** The global label catalog (task-labels feature). */
+  labels: () => ['labels'] as const,
   task: (taskId: string) => ['tasks', taskId] as const,
   comments: (taskId: string) => ['tasks', taskId, 'comments'] as const,
   activities: (taskId: string) => ['tasks', taskId, 'activities'] as const,

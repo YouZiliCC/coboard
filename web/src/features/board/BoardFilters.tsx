@@ -1,5 +1,5 @@
-import { Check, Filter, UserCircle2 } from 'lucide-react';
-import type { ProjectMemberWithUser } from 'shared';
+import { Check, Filter, Tag, UserCircle2 } from 'lucide-react';
+import type { Label, ProjectMemberWithUser } from 'shared';
 import {
   Button,
   DropdownMenu,
@@ -9,12 +9,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../../components/ui';
-import { cn } from '../../lib/utils';
+import { cn, readableTextColor } from '../../lib/utils';
 
 /**
- * Board filters (§6.1, §11 "我的任务" cross-project view as a filter). Two quick
- * filters: "我的任务" (assignee = current user) and a per-assignee dropdown.
- * State is lifted to the board page so it can filter the cached task list.
+ * Board filters (§6.1, §11 "我的任务" cross-project view as a filter). Quick filters:
+ * "我的任务" (assignee = current user), a per-assignee dropdown, and a label filter
+ * dropdown (task-labels). State is lifted to the board page so it can filter the
+ * cached task list.
  */
 
 /** Special filter sentinel values. */
@@ -22,6 +23,10 @@ export const FILTER_ALL = '__all__';
 export const FILTER_ME = '__me__';
 /** Concrete filter value: a member user id, FILTER_ALL, or FILTER_ME. */
 export type AssigneeFilter = string;
+/** Label filter sentinel: no label filter applied. */
+export const LABEL_FILTER_ALL = '__all__';
+/** Concrete label filter value: a label id, or LABEL_FILTER_ALL. */
+export type LabelFilter = string;
 
 export interface BoardFiltersProps {
   value: AssigneeFilter;
@@ -34,6 +39,11 @@ export interface BoardFiltersProps {
    * there is no single project member list — only the 我的任务 quick toggle is shown.
    */
   membersOnly?: boolean;
+  /** The global label catalog, for the label filter dropdown (task-labels). */
+  labels?: Label[];
+  /** Current label filter (a label id or LABEL_FILTER_ALL). */
+  labelFilter?: LabelFilter;
+  onLabelFilterChange?: (value: LabelFilter) => void;
 }
 
 export function BoardFilters({
@@ -42,6 +52,9 @@ export function BoardFilters({
   members,
   currentUserId,
   membersOnly = true,
+  labels = [],
+  labelFilter = LABEL_FILTER_ALL,
+  onLabelFilterChange,
 }: BoardFiltersProps): JSX.Element {
   const isMine = value === FILTER_ME;
   const selectedMember =
@@ -50,6 +63,12 @@ export function BoardFilters({
       : undefined;
 
   const dropdownLabel = selectedMember ? selectedMember.user.displayName : '全部成员';
+
+  const selectedLabel =
+    labelFilter !== LABEL_FILTER_ALL
+      ? labels.find((l) => l.id === labelFilter)
+      : undefined;
+  const showLabelFilter = !!onLabelFilterChange && labels.length > 0;
 
   return (
     <div className="flex items-center gap-2">
@@ -99,6 +118,47 @@ export function BoardFilters({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+      )}
+
+      {/* Label filter dropdown (task-labels) */}
+      {showLabelFilter && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="sm">
+              <Tag className="h-3.5 w-3.5" aria-hidden />
+              <span className="max-w-[8rem] truncate">
+                {selectedLabel ? selectedLabel.name : '全部标签'}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
+            <DropdownMenuLabel>按标签筛选</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => onLabelFilterChange?.(LABEL_FILTER_ALL)}>
+              <span className="flex-1">全部标签</span>
+              {labelFilter === LABEL_FILTER_ALL && (
+                <Check className="h-3.5 w-3.5" aria-hidden />
+              )}
+            </DropdownMenuItem>
+            {labels.map((label) => (
+              <DropdownMenuItem
+                key={label.id}
+                onSelect={() => onLabelFilterChange?.(label.id)}
+                className={cn(
+                  labelFilter === label.id && 'bg-accent text-accent-foreground',
+                )}
+              >
+                <span
+                  className="mr-2 inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: label.color, color: readableTextColor(label.color) }}
+                  aria-hidden
+                />
+                <span className="flex-1 truncate">{label.name}</span>
+                {labelFilter === label.id && <Check className="h-3.5 w-3.5" aria-hidden />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
     </div>
   );

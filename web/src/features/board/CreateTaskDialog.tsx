@@ -23,6 +23,7 @@ import {
 import { isApiClientError } from '../../api/client';
 import { useProjects } from '../../api/projects';
 import { ALL_PROJECTS, useCreateTask, useProjectMembers } from '../../api/tasks';
+import { LabelPicker } from './LabelPicker';
 import { PRIORITY_LABELS } from './labels';
 
 /**
@@ -65,6 +66,8 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
   const defaultProject =
     projectId && projectId !== ALL_PROJECTS ? projectId : NO_PROJECT;
   const [selectedProject, setSelectedProject] = useState<string>(defaultProject);
+  // Selected label ids (task-labels) — kept outside react-hook-form (array state).
+  const [labelIds, setLabelIds] = useState<string[]>([]);
 
   const createTask = useCreateTask();
   // Members for the assignee picker come from the chosen project; a pool task has
@@ -105,6 +108,7 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
   function resetDialog(): void {
     reset();
     setSelectedProject(defaultProject);
+    setLabelIds([]);
   }
 
   const onSubmit = handleSubmit((values) => {
@@ -119,6 +123,7 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
       if (Number.isInteger(pts) && pts >= 0) payload.points = pts;
     }
     if (values.dueDate) payload.dueDate = values.dueDate;
+    if (labelIds.length > 0) payload.labelIds = labelIds;
     // A pool task carries no project and cannot be assigned at creation.
     if (!isPoolTask) {
       payload.projectId = selectedProject;
@@ -272,6 +277,11 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
                 </Select>
               </div>
             )}
+          </div>
+
+          <div className="grid gap-1.5">
+            <Label>标签（选填）</Label>
+            <LabelPicker value={labelIds} onChange={setLabelIds} />
           </div>
 
           {isPoolTask && (

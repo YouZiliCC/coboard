@@ -28,8 +28,11 @@ import {
   BoardFilters,
   FILTER_ALL,
   FILTER_ME,
+  LABEL_FILTER_ALL,
   type AssigneeFilter,
+  type LabelFilter,
 } from './BoardFilters';
+import { useLabels } from '../../api/labels';
 import { COLUMN_ORDER, STATUS_LABELS } from './labels';
 import { canDeliver, canEditTask, canReview, resolveProjectRole } from './permissions';
 import { cn } from '../../lib/utils';
@@ -74,6 +77,8 @@ export function Board({
   const reviewTask = useReviewTask(projectId);
 
   const [filter, setFilter] = useState<AssigneeFilter>(FILTER_ALL);
+  const [labelFilter, setLabelFilter] = useState<LabelFilter>(LABEL_FILTER_ALL);
+  const { data: labels } = useLabels();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   // Deep-link support: `?task=<id>` opens the detail drawer (e.g. from the 灵感区).
@@ -113,13 +118,21 @@ export function Board({
     if (linkedTaskId) setOpenTaskId(linkedTaskId);
   }, [linkedTaskId]);
 
-  /** Apply the claimant filter to the flat task list (v2: filter by claimants). */
+  /**
+   * Apply the claimant filter (v2: filter by claimants) and the label filter
+   * (task-labels) to the flat task list.
+   */
   const filtered = useMemo(() => {
-    if (filter === FILTER_ALL) return tasks;
-    const target = filter === FILTER_ME ? user?.id : filter;
-    if (!target) return tasks;
-    return tasks.filter((t) => t.claimants.some((c) => c.userId === target));
-  }, [tasks, filter, user?.id]);
+    let list = tasks;
+    if (filter !== FILTER_ALL) {
+      const target = filter === FILTER_ME ? user?.id : filter;
+      if (target) list = list.filter((t) => t.claimants.some((c) => c.userId === target));
+    }
+    if (labelFilter !== LABEL_FILTER_ALL) {
+      list = list.filter((t) => t.labels.some((l) => l.id === labelFilter));
+    }
+    return list;
+  }, [tasks, filter, labelFilter, user?.id]);
 
   /** Group filtered tasks by column, sorted by rank then creation time. */
   const columns = useMemo(() => {
@@ -252,6 +265,9 @@ export function Board({
           members={members ?? []}
           currentUserId={user?.id}
           membersOnly={!allProjects}
+          labels={labels ?? []}
+          labelFilter={labelFilter}
+          onLabelFilterChange={setLabelFilter}
         />
         <div className="ml-auto">
           <CreateTaskDialog projectId={projectId} />

@@ -253,9 +253,13 @@ export function usePatchTask(
     onMutate: async ({ taskId, patch }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
       await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
+      // `labelIds` is a write-only id set whose shape differs from the displayed
+      // `labels` objects — strip it from the optimistic spread (the server returns
+      // the resolved label objects, reconciled on settle).
+      const { labelIds: _labelIds, ...optimistic } = patch;
       return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
         ...task,
-        ...patch,
+        ...optimistic,
       }));
     },
     onError: (_err, { taskId }, context) => {

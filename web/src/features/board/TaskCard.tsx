@@ -4,6 +4,7 @@ import type { Task } from 'shared';
 import { Badge, Button } from '../../components/ui';
 import { cn } from '../../lib/utils';
 import { ClaimButton } from './ClaimButton';
+import { LabelChip } from './LabelChip';
 import { ClaimantAvatars } from './ClaimantAvatars';
 import { DeliverDialog } from './DeliverDialog';
 import { ReviewActions } from './ReviewActions';
@@ -53,6 +54,11 @@ export function TaskCard({
   const priority = PRIORITY_BADGE[task.priority];
   const due = dueInfo(task.dueDate);
   const [deliverOpen, setDeliverOpen] = useState(false);
+
+  // Keep cards compact: show at most a few label chips, then a "+N" overflow pill.
+  const MAX_LABELS = 3;
+  const shownLabels = task.labels.slice(0, MAX_LABELS);
+  const extraLabels = task.labels.length - shownLabels.length;
 
   const showClaim = permCtx ? canClaim(permCtx, task) : false;
   const showDeliver = permCtx ? canDeliver(permCtx, task) : false;
@@ -109,6 +115,23 @@ export function TaskCard({
       <h3 className="line-clamp-3 text-sm font-medium leading-snug text-foreground">
         {task.title}
       </h3>
+
+      {/* Labels (task-labels) — compact, wrap, capped with a +N overflow */}
+      {task.labels.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          {shownLabels.map((label) => (
+            <LabelChip key={label.id} label={label} />
+          ))}
+          {extraLabels > 0 && (
+            <span
+              className="inline-flex items-center rounded-full bg-secondary px-2 py-0.5 text-xs font-medium leading-none text-muted-foreground"
+              title={task.labels.map((l) => l.name).join('、')}
+            >
+              +{extraLabels}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Footer: due date + claimants */}
       <div className="mt-1 flex items-center justify-between gap-2">

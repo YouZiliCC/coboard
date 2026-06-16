@@ -3,6 +3,7 @@ import type {
   AssignTaskInput,
   CreateTaskInput,
   DeliverTaskInput,
+  Label,
   ReviewTaskInput,
   Task,
   TaskClaimant,
@@ -21,6 +22,7 @@ import {
   type UserRow,
 } from '../db/schema.js';
 import { conflict, forbidden, notFound, validationError } from '../lib/errors.js';
+import { loadLabelsForTasks, setTaskLabels } from './labelService.js';
 import {
   canEditNoProjectTask,
   canEditTask,
@@ -172,6 +174,7 @@ export function serializeTask(
   row: TaskRow,
   claimants: ClaimantWithUser[] = [],
   project: TaskProjectContext | null = null,
+  labels: Label[] = [],
 ): Task {
   return {
     id: row.id,
@@ -193,6 +196,7 @@ export function serializeTask(
     claimants: [...claimants]
       .sort((a, b) => a.row.claimedAt.getTime() - b.row.claimedAt.getTime())
       .map(serializeClaimant),
+    labels,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -246,11 +250,12 @@ async function loadProjectContext(
   return row ? { name: row.name, key: row.key } : null;
 }
 
-/** Load + serialize a single task with its claimants and owning-project context. */
+/** Load + serialize a single task with its claimants, project context, and labels. */
 async function serializeTaskById(db: Database, row: TaskRow): Promise<Task> {
   const byTask = await loadClaimantsForTasks(db, [row.id]);
   const project = await loadProjectContext(db, row.projectId);
-  return serializeTask(row, byTask.get(row.id) ?? [], project);
+  const labelsByTask = await loadLabelsForTasks(db, [row.id]);
+  return serializeTask(row, byTask.get(row.id) ?? [], project, labelsByTask.get(row.id) ?? []);
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +339,13 @@ export async function listBoardTasks(db: Database, projectId: string): Promise<T
     rows.map((r) => r.id),
   );
   const project = await loadProjectContext(db, projectId);
-  return rows.map((row) => serializeTask(row, byTask.get(row.id) ?? [], project));
+  const labelsByTask = await loadLabelsForTasks(
+    db,
+    rows.map((r) => r.id),
+  );
+  return rows.map((row) =>
+    serializeTask(row, byTask.get(row.id) ?? [], project, labelsByTask.get(row.id) ?? []),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +408,17 @@ export async function listAllVisibleTasks(
     }
   }
 
+  const labelsByTask = await loadLabelsForTasks(
+    db,
+    rows.map((r) => r.id),
+  );
+
   return rows.map((row) =>
     serializeTask(
       row,
       byTask.get(row.id) ?? [],
       row.projectId === null ? null : projectById.get(row.projectId) ?? null,
+      labelsByTask.get(row.id) ?? [],
     ),
   );
 }
@@ -460,6 +477,12 @@ export async function createTask(
       .insert(taskClaimants)
       .values({ taskId: created.id, userId: input.assigneeId })
       .onConflictDoNothing();
+  }
+
+  // Apply the optional label set (task-labels). The caller created the task, so
+  // they may set its labels (creation implies edit rights on the new task).
+  if (input.labelIds !== undefined) {
+    await setTaskLabels(db, created.id, input.labelIds);
   }
 
   await recordActivity(db, {
@@ -549,11 +572,19 @@ export async function updateTask(
     patch.status = to;
   }
 
-  const [updated] = await db
-    .update(tasks)
-    .set(patch)
-    .where(eq(tasks.id, taskId))
-    .returning();
+  // Apply the optional label REPLACE set (task-labels). Permitted to anyone who may
+  // edit the task — the same gate already enforced above.
+  if (input.labelIds !== undefined) {
+    await setTaskLabels(db, taskId, input.labelIds);
+  }
+
+  // A patch may carry only `labelIds` (no scalar fields); skip the empty UPDATE then.
+  const updated =
+    Object.keys(patch).length > 0
+      ? (
+          await db.update(tasks).set(patch).where(eq(tasks.id, taskId)).returning()
+        )[0]
+      : task;
 
   if (!updated) {
     throw notFound('任务不存在');
@@ -568,13 +599,15 @@ export async function updateTask(
       meta: { from: task.status, to: nextStatus },
     }, bus);
   } else {
-    // Field-only edit (incl. rank reorder).
+    // Field-only edit (incl. rank reorder and/or a label set change).
+    const fields = Object.keys(patch);
+    if (input.labelIds !== undefined) fields.push('labelIds');
     await recordActivity(db, {
       taskId,
       projectId: updated.projectId,
       actorId: actor.id,
       type: 'updated',
-      meta: { fields: Object.keys(patch) },
+      meta: { fields },
     }, bus);
   }
 

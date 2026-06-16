@@ -250,6 +250,52 @@ export const taskClaimants = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// labels — a GLOBAL catalog of custom { name, color } labels shared across every
+// project/task (task-labels feature). A label is many-to-many with tasks via
+// `task_labels`. `name` is unique (a single shared catalog); `color` is a #RRGGBB
+// hex. `created_by` is the user who created it (nullable so deleting a user keeps
+// the label). Customizable: any logged-in user may create; only a global admin may
+// rename/recolor/delete.
+// ---------------------------------------------------------------------------
+
+export const labels = pgTable(
+  'labels',
+  {
+    id: primaryId,
+    name: text('name').notNull(),
+    // Hex color like #ef4444.
+    color: text('color').notNull(),
+    createdBy: uuid('created_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt,
+  },
+  (table) => [uniqueIndex('labels_name_uniq').on(table.name)],
+);
+
+// ---------------------------------------------------------------------------
+// task_labels — many-to-many join between tasks and the global label catalog.
+// PK is (task_id, label_id); both sides cascade so labels detach when a task or a
+// label is deleted.
+// ---------------------------------------------------------------------------
+
+export const taskLabels = pgTable(
+  'task_labels',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    labelId: uuid('label_id')
+      .notNull()
+      .references(() => labels.id, { onDelete: 'cascade' }),
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.labelId] }),
+    index('task_labels_label_id_idx').on(table.labelId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // comments (§5)
 // ---------------------------------------------------------------------------
 
@@ -401,6 +447,10 @@ export type TaskRow = typeof tasks.$inferSelect;
 export type NewTaskRow = typeof tasks.$inferInsert;
 export type TaskClaimantRow = typeof taskClaimants.$inferSelect;
 export type NewTaskClaimantRow = typeof taskClaimants.$inferInsert;
+export type LabelRow = typeof labels.$inferSelect;
+export type NewLabelRow = typeof labels.$inferInsert;
+export type TaskLabelRow = typeof taskLabels.$inferSelect;
+export type NewTaskLabelRow = typeof taskLabels.$inferInsert;
 export type CommentRow = typeof comments.$inferSelect;
 export type NewCommentRow = typeof comments.$inferInsert;
 export type ActivityRow = typeof activities.$inferSelect;
@@ -421,6 +471,8 @@ export const schema = {
   projectMembers,
   tasks,
   taskClaimants,
+  labels,
+  taskLabels,
   comments,
   activities,
   ideas,

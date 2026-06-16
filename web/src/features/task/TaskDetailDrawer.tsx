@@ -60,6 +60,8 @@ import {
   isManager,
   resolveProjectRole,
 } from '../board/permissions';
+import { LabelChip } from '../board/LabelChip';
+import { LabelPicker } from '../board/LabelPicker';
 import { renderMarkdown } from './markdown';
 import { CommentComposer } from './CommentComposer';
 import { CommentList } from './CommentList';
@@ -231,6 +233,13 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
         ) : (
           <div className="flex flex-col gap-3">
             <DrawerTitle className="text-xl leading-snug">{task.title}</DrawerTitle>
+            {task.labels.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {task.labels.map((label) => (
+                  <LabelChip key={label.id} label={label} />
+                ))}
+              </div>
+            )}
             {task.description ? (
               renderMarkdown(task.description)
             ) : (
@@ -530,6 +539,7 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
   const [priority, setPriority] = useState<Priority>(task.priority);
   const [points, setPoints] = useState(task.points != null ? String(task.points) : '');
   const [dueDate, setDueDate] = useState(task.dueDate ?? '');
+  const [labelIds, setLabelIds] = useState<string[]>(task.labels.map((l) => l.id));
   const [error, setError] = useState<string | null>(null);
 
   function submit(e: React.FormEvent): void {
@@ -541,6 +551,8 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
       priority,
       points: points.trim() ? Number(points) : null,
       dueDate: dueDate ? dueDate : null,
+      // REPLACE set: the task's labels become exactly the chosen ids.
+      labelIds,
     };
     const parsed = updateTaskInputSchema.safeParse(patch);
     if (!parsed.success) {
@@ -607,6 +619,10 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
             onChange={(e) => setDueDate(e.target.value)}
           />
         </div>
+      </div>
+      <div className="grid gap-1.5">
+        <Label>标签</Label>
+        <LabelPicker value={labelIds} onChange={setLabelIds} />
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
       <div className="flex items-center gap-2">

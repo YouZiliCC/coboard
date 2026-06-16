@@ -45,6 +45,13 @@ export const projectKeySchema = z
   .max(10, '项目标识最多 10 位')
   .regex(/^[A-Z0-9]+$/, '项目标识只能包含大写字母和数字');
 
+/** Hex color for a task label, e.g. "#ef4444". */
+export const labelColorSchema = z
+  .string()
+  .regex(/^#[0-9a-fA-F]{6}$/, '颜色应为 #RRGGBB 格式');
+/** Label display name (the shared catalog is keyed on a unique name). */
+export const labelNameSchema = z.string().trim().min(1, '标签名称不能为空').max(30);
+
 // ---------------------------------------------------------------------------
 // Entities (§5) — shapes as returned by the API
 // ---------------------------------------------------------------------------
@@ -117,6 +124,18 @@ export const taskClaimantSchema = z.object({
 export type TaskClaimant = z.infer<typeof taskClaimantSchema>;
 
 /**
+ * A custom task label (task-labels feature). A GLOBAL catalog entry — one shared set
+ * of `{ name, color }` labels across every project/task, many-to-many with tasks.
+ * `color` is a #RRGGBB hex; the front-end derives readable foreground text from it.
+ */
+export const labelSchema = z.object({
+  id: uuidSchema,
+  name: labelNameSchema,
+  color: labelColorSchema,
+});
+export type Label = z.infer<typeof labelSchema>;
+
+/**
  * Task wire shape (lifecycle v2 §2/§3; no-project tasks §8). The single
  * `assigneeId`/`completedBy` fields are gone — the set of workers is carried in
  * `claimants`. `deliveredAt`/`deliveredBy` are set on deliver and cleared on reject;
@@ -148,6 +167,8 @@ export const taskSchema = z.object({
   reviewedBy: uuidSchema.nullable(),
   /** The set of users who have claimed this task, with their points shares. */
   claimants: z.array(taskClaimantSchema),
+  /** The task's labels from the global catalog (task-labels feature). */
+  labels: z.array(labelSchema),
   createdAt: isoDateTimeSchema,
 });
 export type Task = z.infer<typeof taskSchema>;
@@ -540,6 +561,43 @@ export const addProjectMemberInputSchema = z.object({
 export type AddProjectMemberInput = z.infer<typeof addProjectMemberInputSchema>;
 
 // ---------------------------------------------------------------------------
+// Labels (task-labels feature) — a GLOBAL custom-label catalog
+// ---------------------------------------------------------------------------
+
+/** GET /labels — the whole shared label catalog. */
+export const labelsResponseSchema = z.object({
+  labels: z.array(labelSchema),
+});
+export type LabelsResponse = z.infer<typeof labelsResponseSchema>;
+
+/** POST | PATCH /labels — single-label response wrapper. */
+export const labelResponseSchema = z.object({
+  label: labelSchema,
+});
+export type LabelResponse = z.infer<typeof labelResponseSchema>;
+
+/** POST /labels — create a catalog label (any logged-in user; 409 on dup name). */
+export const createLabelInputSchema = z.object({
+  name: labelNameSchema,
+  color: labelColorSchema,
+});
+export type CreateLabelInput = z.infer<typeof createLabelInputSchema>;
+
+/** PATCH /labels/:id — rename / recolor a label (global admin only). */
+export const updateLabelInputSchema = z
+  .object({
+    name: labelNameSchema.optional(),
+    color: labelColorSchema.optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: '至少修改一个字段',
+  });
+export type UpdateLabelInput = z.infer<typeof updateLabelInputSchema>;
+
+/** Optional label-id set carried on task create/patch — a REPLACE set on patch. */
+export const labelIdsSchema = z.array(uuidSchema).max(20);
+
+// ---------------------------------------------------------------------------
 // Tasks (§7)
 // ---------------------------------------------------------------------------
 
@@ -570,6 +628,8 @@ export const createTaskInputSchema = z.object({
   assigneeId: uuidSchema.nullable().optional(),
   /** Owning project (§8); omit/null to create a no-project (pool) task. */
   projectId: uuidSchema.nullable().optional(),
+  /** Optional label set (task-labels): the task's labels become exactly these. */
+  labelIds: labelIdsSchema.optional(),
 });
 export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 
@@ -584,6 +644,11 @@ export const updateTaskInputSchema = z
     dueDate: dateOnlySchema.nullable().optional(),
     /** Lexicographic rank key for intra-column ordering. */
     rank: z.string().min(1).optional(),
+    /**
+     * Optional label set (task-labels). When present this is a REPLACE set: the
+     * task's labels become exactly these ids (an empty array clears them).
+     */
+    labelIds: labelIdsSchema.optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: '至少修改一个字段',
