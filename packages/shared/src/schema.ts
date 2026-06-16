@@ -209,13 +209,16 @@ export const userSummarySchema = z.object({
 export type UserSummary = z.infer<typeof userSummarySchema>;
 
 /**
- * An idea posted against a task (§7.1). `status` starts `pending`; on adoption a
- * lead/admin writes `rewardPoints` (credited to the author's contribution) and
- * `adoptedBy`. The `author` is a display summary; `body` is safe markdown.
+ * An idea (§7.1). Either posted against a task (`taskId` set) or STANDALONE in the
+ * 灵感区 (`taskId` null — no owning task/project, visible to all logged-in users).
+ * `status` starts `pending`; on adoption a lead/admin writes `rewardPoints`
+ * (credited to the author's contribution) and `adoptedBy`. The `author` is a
+ * display summary; `body` is safe markdown.
  */
 export const ideaSchema = z.object({
   id: uuidSchema,
-  taskId: uuidSchema,
+  /** Owning task; null for a STANDALONE 灵感区 idea. */
+  taskId: uuidSchema.nullable(),
   author: userSummarySchema,
   body: z.string(),
   status: ideaStatusSchema,
@@ -229,21 +232,31 @@ export type Idea = z.infer<typeof ideaSchema>;
 
 /**
  * An idea enriched with its task title + owning project (§7.1), as returned by the
- * cross-project 灵感区 listing (GET /ideas). The per-task listing returns the plain
- * {@link ideaSchema} (task/project are already in context).
+ * cross-project 灵感区 listing (GET /ideas). For a STANDALONE idea (no task) the
+ * `taskTitle`, `projectId` and `projectName` are all null. The per-task listing
+ * returns the plain {@link ideaSchema} (task/project are already in context).
  */
 export const ideaWithContextSchema = ideaSchema.extend({
-  taskTitle: z.string(),
-  projectId: uuidSchema,
-  projectName: z.string(),
+  /** Owning task's title; null for a STANDALONE 灵感区 idea. */
+  taskTitle: z.string().nullable(),
+  /** Owning project id; null for a STANDALONE 灵感区 idea. */
+  projectId: uuidSchema.nullable(),
+  /** Owning project name; null for a STANDALONE 灵感区 idea. */
+  projectName: z.string().nullable(),
 });
 export type IdeaWithContext = z.infer<typeof ideaWithContextSchema>;
 
-/** POST /tasks/:id/ideas — post an idea (any project member). */
+/** POST /tasks/:id/ideas — post an idea on a task (any project member). */
 export const createIdeaInputSchema = z.object({
   body: z.string().trim().min(1, '想法不能为空').max(20000),
 });
 export type CreateIdeaInput = z.infer<typeof createIdeaInputSchema>;
+
+/** POST /ideas — post a STANDALONE idea in the 灵感区 (any logged-in user). */
+export const createStandaloneIdeaInputSchema = z.object({
+  body: z.string().trim().min(1, '想法不能为空').max(20000),
+});
+export type CreateStandaloneIdeaInput = z.infer<typeof createStandaloneIdeaInputSchema>;
 
 /** POST /ideas/:id/adopt — adopt an idea + grant reward points (lead/admin). */
 export const adoptIdeaInputSchema = z.object({

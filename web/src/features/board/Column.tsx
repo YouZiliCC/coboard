@@ -20,6 +20,8 @@ export interface ColumnProps {
   /** Show a per-card owning-project badge (the 全部项目 view, §8). */
   showProjectBadge?: boolean;
   onOpenTask?: (taskId: string) => void;
+  /** Extra classes — used by the mobile paged view to show/hide one column. */
+  className?: string;
 }
 
 const COLUMN_ACCENT: Record<TaskStatus, string> = {
@@ -36,17 +38,18 @@ export function Column({
   permCtx,
   showProjectBadge = false,
   onOpenTask,
+  className,
 }: ColumnProps): JSX.Element {
   const { setNodeRef, isOver } = useDroppable({ id: status, data: { type: 'column', status } });
 
   return (
     <section
       className={cn(
-        // Mobile: each column is a fixed, comfortable width that overflows the
-        // viewport so the board scrolls horizontally (one column snaps into view
-        // at a time). md+: restore equal full-width flex columns for desktop.
-        'flex h-full w-[82vw] max-w-[20rem] shrink-0 snap-start flex-col rounded-xl bg-secondary/40',
-        'md:w-auto md:max-w-none md:flex-1 md:shrink md:snap-align-none',
+        // Mobile (paged view): the active column fills the width; siblings are
+        // hidden by the parent (see Board). md+: equal full-width flex columns.
+        'flex h-full w-full shrink-0 flex-col rounded-xl bg-secondary/40',
+        'md:w-auto md:flex-1 md:shrink',
+        className,
       )}
       aria-label={STATUS_LABELS[status]}
     >

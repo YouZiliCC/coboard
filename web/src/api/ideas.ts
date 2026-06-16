@@ -8,6 +8,7 @@ import {
 import type {
   AdoptIdeaInput,
   CreateIdeaInput,
+  CreateStandaloneIdeaInput,
   Idea,
   IdeaResponse,
   IdeasResponse,
@@ -50,6 +51,8 @@ export const ideasApi = {
     api.get<IdeasResponse>(`/tasks/${taskId}/ideas`, { signal }),
   create: (taskId: string, body: CreateIdeaInput): Promise<Idea> =>
     unwrapIdea(api.post<IdeasResponse>(`/tasks/${taskId}/ideas`, body)),
+  createStandalone: (body: CreateStandaloneIdeaInput): Promise<Idea> =>
+    api.post<IdeaResponse>('/ideas', body).then((r) => r.idea),
   all: (
     params: { status?: IdeaStatus },
     signal?: AbortSignal,
@@ -119,6 +122,22 @@ export function useCreateIdea(taskId: string): UseMutationResult<Idea, Error, Cr
   return useMutation<Idea, Error, CreateIdeaInput>({
     mutationFn: (body) => ideasApi.create(taskId, body),
     onSuccess: () => invalidateIdeas(queryClient, taskId),
+  });
+}
+
+/**
+ * Post a STANDALONE idea in the 灵感区 (§7.1 POST /ideas; any logged-in user). No
+ * task is involved, so only the cross-project idea list + stats are invalidated.
+ */
+export function useCreateStandaloneIdea(): UseMutationResult<
+  Idea,
+  Error,
+  CreateStandaloneIdeaInput
+> {
+  const queryClient = useQueryClient();
+  return useMutation<Idea, Error, CreateStandaloneIdeaInput>({
+    mutationFn: (body) => ideasApi.createStandalone(body),
+    onSuccess: () => invalidateIdeas(queryClient),
   });
 }
 

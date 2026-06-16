@@ -3,13 +3,14 @@ import { eq } from 'drizzle-orm';
 import {
   adoptIdeaInputSchema,
   createIdeaInputSchema,
+  createStandaloneIdeaInputSchema,
   idParamSchema,
   ideasQuerySchema,
   type IdeaResponse,
   type IdeasResponse,
   type IdeasWithContextResponse,
 } from 'shared';
-import { projectMembers, type UserRow } from '../db/schema.js';
+import { projectMembers, type IdeaRow, type UserRow } from '../db/schema.js';
 import { forbidden } from '../lib/errors.js';
 import { requireAuth, requireTaskVisibility } from '../lib/guards.js';
 import { parseBody, parseParams, parseQuery } from '../lib/validate.js';
@@ -17,25 +18,30 @@ import { loadTaskOrThrow } from '../services/commentService.js';
 import {
   adoptIdea,
   createIdea,
+  createStandaloneIdea,
   listTaskIdeas,
   listVisibleIdeas,
   loadIdeaOrThrow,
   rejectIdea,
   type IdeaScope,
 } from '../services/ideaService.js';
+import type { FastifyRequest } from 'fastify';
 import type { Database } from '../db/index.js';
 
 /**
  * Idea / inspiration routes (§7.1):
  * - GET    /tasks/:id/ideas   list a task's ideas (project member)
  * - POST   /tasks/:id/ideas   post an idea on a task (project member)
- * - GET    /ideas             the cross-project 灵感区 (auth; visible projects)
- * - POST   /ideas/:id/adopt   adopt + reward (project lead / global admin)
- * - POST   /ideas/:id/reject  reject (project lead / global admin)
+ * - POST   /ideas             post a STANDALONE 灵感区 idea (any logged-in user)
+ * - GET    /ideas             the 灵感区 (auth; standalone + visible-project ideas)
+ * - POST   /ideas/:id/adopt   adopt + reward (task idea: project lead / global admin;
+ *                             standalone idea: global admin only)
+ * - POST   /ideas/:id/reject  reject (same permission rule as adopt)
  *
  * Membership / lead gating uses the shared guards; data access + realtime fan-out
  * live in ideaService. The per-task endpoints resolve the owning project from the
- * task; the cross-project listing scopes to the caller's visible projects.
+ * task; the cross-project listing scopes to the caller's visible projects plus all
+ * standalone ideas.
  */
 
 /**
@@ -52,6 +58,36 @@ async function resolveIdeaScope(db: Database, user: UserRow): Promise<IdeaScope>
     .from(projectMembers)
     .where(eq(projectMembers.userId, user.id));
   return { kind: 'projects', projectIds: rows.map((r) => r.projectId) };
+}
+
+/**
+ * Resolve who the caller is relative to an idea being adopted/rejected, enforcing
+ * the review permission and returning the owning project id for the realtime fan-out:
+ * - TASK idea: the task's project lead / global admin (pool task: creator / admin),
+ *   via {@link requireTaskVisibility}'s `isLead` flag. Throws 403 otherwise.
+ * - STANDALONE idea (no task / project): global admin only. Throws 403 otherwise.
+ */
+async function authorizeIdeaReview(
+  db: Database,
+  request: FastifyRequest,
+  idea: IdeaRow,
+): Promise<{ user: UserRow; projectId: string | null }> {
+  if (idea.taskId === null) {
+    const user = requireAuth(request);
+    if (user.role !== 'admin') {
+      throw forbidden('需要管理员权限');
+    }
+    return { user, projectId: null };
+  }
+
+  const task = await loadTaskOrThrow(db, idea.taskId);
+  // Project lead / global admin (project task), or the task creator / admin (pool
+  // task, §8) — the lead-equivalent is carried in `isLead`.
+  const { user, isLead } = await requireTaskVisibility(db, request, task);
+  if (!isLead) {
+    throw forbidden('需要项目负责人权限');
+  }
+  return { user, projectId: task.projectId };
 }
 
 const ideasRoutes: FastifyPluginAsync = async (fastify) => {
@@ -92,6 +128,21 @@ const ideasRoutes: FastifyPluginAsync = async (fastify) => {
     return { ideas: [idea] };
   });
 
+  // --- POST /ideas (standalone 灵感区 idea) ---------------------------------
+  fastify.post('/ideas', async (request, reply): Promise<IdeaResponse> => {
+    const user = requireAuth(request);
+    const input = parseBody(createStandaloneIdeaInputSchema, request.body);
+
+    const idea = await createStandaloneIdea(
+      db,
+      { authorId: user.id, body: input.body },
+      bus,
+    );
+
+    reply.code(201);
+    return { idea };
+  });
+
   // --- GET /ideas (灵感区) --------------------------------------------------
   fastify.get('/ideas', async (request): Promise<IdeasWithContextResponse> => {
     const user = requireAuth(request);
@@ -102,45 +153,28 @@ const ideasRoutes: FastifyPluginAsync = async (fastify) => {
     return { ideas };
   });
 
-  // --- POST /ideas/:id/adopt (lead / admin) --------------------------------
+  // --- POST /ideas/:id/adopt -----------------------------------------------
+  // Task idea: project lead / global admin. Standalone idea: global admin only.
   fastify.post('/ideas/:id/adopt', async (request): Promise<IdeaResponse> => {
     const { id } = parseParams(idParamSchema, request.params);
     const input = parseBody(adoptIdeaInputSchema, request.body);
 
     const idea = await loadIdeaOrThrow(db, id);
-    const task = await loadTaskOrThrow(db, idea.taskId);
-    // Project lead / global admin (project task), or the task creator / admin (pool
-    // task, §8) — the lead-equivalent is carried in `isLead`.
-    const { user, isLead } = await requireTaskVisibility(db, request, task);
-    if (!isLead) {
-      throw forbidden('需要项目负责人权限');
-    }
+    const { user, projectId } = await authorizeIdeaReview(db, request, idea);
 
-    const adopted = await adoptIdea(
-      db,
-      idea,
-      task.projectId,
-      user.id,
-      input.rewardPoints,
-      bus,
-    );
+    const adopted = await adoptIdea(db, idea, projectId, user.id, input.rewardPoints, bus);
     return { idea: adopted };
   });
 
-  // --- POST /ideas/:id/reject (lead / admin) -------------------------------
+  // --- POST /ideas/:id/reject ----------------------------------------------
+  // Task idea: project lead / global admin. Standalone idea: global admin only.
   fastify.post('/ideas/:id/reject', async (request): Promise<IdeaResponse> => {
     const { id } = parseParams(idParamSchema, request.params);
 
     const idea = await loadIdeaOrThrow(db, id);
-    const task = await loadTaskOrThrow(db, idea.taskId);
-    // Project lead / global admin (project task), or the task creator / admin (pool
-    // task, §8) — the lead-equivalent is carried in `isLead`.
-    const { user, isLead } = await requireTaskVisibility(db, request, task);
-    if (!isLead) {
-      throw forbidden('需要项目负责人权限');
-    }
+    const { user, projectId } = await authorizeIdeaReview(db, request, idea);
 
-    const rejected = await rejectIdea(db, idea, task.projectId, user.id, bus);
+    const rejected = await rejectIdea(db, idea, projectId, user.id, bus);
     return { idea: rejected };
   });
 };

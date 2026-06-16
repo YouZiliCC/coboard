@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import type { Idea, IdeaStatus, IdeaWithContext, UserSummary } from 'shared';
 import type { Database } from '../db/index.js';
 import {
@@ -91,22 +91,32 @@ export type IdeaScope =
   | { kind: 'projects'; projectIds: string[] };
 
 /**
- * List all ideas across the caller's visible projects (§7.1), newest first, each
- * enriched with its task title + owning project. Optionally filtered by status.
- * `scope` constrains visibility (admins: all projects; members: their projects).
+ * List the ideas the caller may see in the 灵感区 (§7.1), newest first, each
+ * enriched with its task title + owning project (all null for a STANDALONE idea).
+ * Optionally filtered by status. Visibility:
+ * - STANDALONE ideas (no task) — visible to every logged-in user.
+ * - TASK ideas — visible only within the caller's project scope (admins: all).
+ *
+ * Uses LEFT JOINs to tasks/projects so task-less (standalone) ideas come back with
+ * null taskTitle/projectId/projectName.
  */
 export async function listVisibleIdeas(
   db: Database,
   scope: IdeaScope,
   status?: IdeaStatus,
 ): Promise<IdeaWithContext[]> {
-  if (scope.kind === 'projects' && scope.projectIds.length === 0) {
-    return [];
-  }
-
   const conditions = [];
+
+  // Scope the TASK ideas to the caller's visible projects; STANDALONE ideas
+  // (task_id IS NULL) are always visible. A global admin ('all') sees every idea.
   if (scope.kind === 'projects') {
-    conditions.push(inArray(tasks.projectId, scope.projectIds));
+    const standalone = isNull(ideas.taskId);
+    const visibleTaskIdeas =
+      scope.projectIds.length === 0
+        ? undefined
+        : inArray(tasks.projectId, scope.projectIds);
+    const predicate = visibleTaskIdeas ? or(standalone, visibleTaskIdeas) : standalone;
+    if (predicate) conditions.push(predicate);
   }
   if (status) {
     conditions.push(eq(ideas.status, status));
@@ -122,8 +132,8 @@ export async function listVisibleIdeas(
     })
     .from(ideas)
     .innerJoin(users, eq(ideas.authorId, users.id))
-    .innerJoin(tasks, eq(ideas.taskId, tasks.id))
-    .innerJoin(projects, eq(tasks.projectId, projects.id))
+    .leftJoin(tasks, eq(ideas.taskId, tasks.id))
+    .leftJoin(projects, eq(tasks.projectId, projects.id))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(ideas.createdAt));
 
@@ -179,6 +189,50 @@ export async function createIdea(
       projectId: params.projectId,
       entity: 'idea',
       payload: { ideaId: inserted.id, taskId: params.taskId, authorId: params.authorId },
+    },
+    realtimeBus,
+  );
+
+  return toIdea(inserted, author);
+}
+
+export interface CreateStandaloneIdeaParams {
+  authorId: string;
+  body: string;
+}
+
+/**
+ * Post a STANDALONE idea in the 灵感区 (no task / project), authored by any logged-in
+ * user. Publishes a no-project (global channel) `idea` event so every connected
+ * client refreshes the 灵感区. Returns the new idea joined with its author.
+ */
+export async function createStandaloneIdea(
+  db: Database,
+  params: CreateStandaloneIdeaParams,
+  realtimeBus: RealtimeBus = bus,
+): Promise<Idea> {
+  const [inserted] = await db
+    .insert(ideas)
+    .values({
+      taskId: null,
+      authorId: params.authorId,
+      body: params.body,
+    })
+    .returning();
+
+  if (!inserted) {
+    // Unreachable: insert..returning yields a row on success.
+    throw new Error('创建想法失败：未返回插入行');
+  }
+
+  const author = await loadUserOrThrow(db, params.authorId);
+
+  publishChange(
+    {
+      type: 'idea_created',
+      projectId: null,
+      entity: 'idea',
+      payload: { ideaId: inserted.id, taskId: null, authorId: params.authorId },
     },
     realtimeBus,
   );

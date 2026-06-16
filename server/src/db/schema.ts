@@ -307,18 +307,21 @@ export const activities = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// ideas (§7.1) — inspiration / suggestions posted against a task. A lead/admin
-// may adopt one (writing reward_points credited to the author's contribution) or
-// reject it. Cascades with the owning task.
+// ideas (§7.1) — inspiration / suggestions. Either posted against a task (the
+// task's 想法 section) or STANDALONE in the 灵感区 (task_id NULL — no owning
+// project, visible to every logged-in user). A lead/admin may adopt one (writing
+// reward_points credited to the author's contribution) or reject it. Task ideas
+// cascade with their owning task.
 // ---------------------------------------------------------------------------
 
 export const ideas = pgTable(
   'ideas',
   {
     id: primaryId,
-    taskId: uuid('task_id')
-      .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
+    // Nullable: a NULL task_id is a STANDALONE 灵感区 idea (no task / project),
+    // visible to all logged-in users. Task ideas reference their owning task and
+    // cascade with it.
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }),
     authorId: uuid('author_id')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),

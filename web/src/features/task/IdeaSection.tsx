@@ -88,7 +88,7 @@ function IdeaItem({ idea, canManage }: { idea: Idea; canManage: boolean }): JSX.
       return;
     }
     adoptIdea.mutate(
-      { ideaId: idea.id, input: parsed.data, taskId: idea.taskId },
+      { ideaId: idea.id, input: parsed.data, taskId: idea.taskId ?? undefined },
       {
         onSuccess: () => {
           setAdopting(false);
@@ -171,7 +171,7 @@ function IdeaItem({ idea, canManage }: { idea: Idea; canManage: boolean }): JSX.
                   size="sm"
                   variant="outline"
                   loading={rejectIdea.isPending}
-                  onClick={() => rejectIdea.mutate({ ideaId: idea.id, taskId: idea.taskId })}
+                  onClick={() => rejectIdea.mutate({ ideaId: idea.id, taskId: idea.taskId ?? undefined })}
                 >
                   <X className="h-3.5 w-3.5" aria-hidden />
                   驳回

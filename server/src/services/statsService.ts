@@ -28,7 +28,9 @@ import {
  *   time-filtered on the task's `completed_at`.
  * - idea reward points: SUM(`ideas.reward_points`) over ideas the user authored that
  *   were adopted (`status='adopted'`), time-filtered on the idea's `updated_at` (the
- *   adoption time) — consistent with how task points filter on `completed_at`.
+ *   adoption time) — consistent with how task points filter on `completed_at`. Ideas
+ *   LEFT-join their task so STANDALONE adopted ideas (no task/project) still count for
+ *   the "all" / own-visible scopes (a specific-project filter excludes them, §7.1).
  *
  * The completed COUNT stays tasks-only (§7.1: 完成数仍只来自任务).
  *
@@ -159,7 +161,8 @@ const rewardPointsSumSql = sql<number>`coalesce(sum(coalesce(${ideas.rewardPoint
  * Build the WHERE predicate for the adopted-idea reward aggregate (§7.1): only
  * `adopted` ideas, narrowed by the visibility scope (joined via the idea's task's
  * project) and the time window on the idea's `updated_at` (the adoption time), and
- * optionally to a single author. Returns `'never'` for an empty project set.
+ * optionally to a single author. An empty member-project set still matches the
+ * no-project ideas (standalone + pool), so this never returns `'never'`.
  */
 function buildRewardFilters(args: {
   scope: StatsScope;
@@ -171,11 +174,13 @@ function buildRewardFilters(args: {
 
   switch (args.scope.kind) {
     case 'project':
-      // A specific project excludes ideas on no-project (pool) tasks (§8).
+      // A specific project excludes ideas on no-project (pool) tasks AND standalone
+      // ideas (no task → NULL project via the LEFT JOIN) (§7.1 / §8).
       conditions.push(eq(tasks.projectId, args.scope.projectId));
       break;
     case 'projects': {
-      // Member projects PLUS ideas on shared pool tasks (visible to all, §8).
+      // Member projects PLUS ideas with no project: pool-task ideas and STANDALONE
+      // 灵感区 ideas (both visible to all logged-in users) (§7.1 / §8).
       const pool = isNull(tasks.projectId);
       const predicate =
         args.scope.projectIds.length === 0
@@ -215,7 +220,7 @@ async function rewardPointsByAuthor(
   const rows = await db
     .select({ authorId: ideas.authorId, rewardPoints: rewardPointsSumSql })
     .from(ideas)
-    .innerJoin(tasks, eq(tasks.id, ideas.taskId))
+    .leftJoin(tasks, eq(tasks.id, ideas.taskId))
     .where(where)
     .groupBy(ideas.authorId);
 
@@ -237,7 +242,7 @@ async function rewardPointsForUser(
   const rows = await db
     .select({ rewardPoints: rewardPointsSumSql })
     .from(ideas)
-    .innerJoin(tasks, eq(tasks.id, ideas.taskId))
+    .leftJoin(tasks, eq(tasks.id, ideas.taskId))
     .where(where);
   return rows[0]?.rewardPoints ?? 0;
 }
@@ -476,7 +481,7 @@ export async function getTrend(
       : await db
           .select({ date: rewardBucketDate, rewardPoints: rewardPointsSumSql })
           .from(ideas)
-          .innerJoin(tasks, eq(tasks.id, ideas.taskId))
+          .leftJoin(tasks, eq(tasks.id, ideas.taskId))
           .where(rewardWhere)
           .groupBy(rewardBucketDate);
 

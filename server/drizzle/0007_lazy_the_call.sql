@@ -1,0 +1,1 @@
+ALTER TABLE "ideas" ALTER COLUMN "task_id" DROP NOT NULL;

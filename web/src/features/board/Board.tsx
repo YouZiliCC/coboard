@@ -30,8 +30,9 @@ import {
   FILTER_ME,
   type AssigneeFilter,
 } from './BoardFilters';
-import { COLUMN_ORDER } from './labels';
+import { COLUMN_ORDER, STATUS_LABELS } from './labels';
 import { canDeliver, canEditTask, canReview, resolveProjectRole } from './permissions';
+import { cn } from '../../lib/utils';
 import { rankBetween } from './rank';
 
 /**
@@ -95,6 +96,9 @@ export function Board({
 
   const projectRole = resolveProjectRole(members, user?.id);
   const permCtx = useMemo(() => ({ user, projectRole }), [user, projectRole]);
+
+  // Mobile only: which status "page" is shown (desktop shows all 4 columns).
+  const [activeStatus, setActiveStatus] = useState<TaskStatus>('open');
 
   // Auto-dismiss the transient hint.
   useEffect(() => {
@@ -280,7 +284,39 @@ export function Board({
           onDragEnd={handleDragEnd}
           onDragCancel={() => setActiveId(null)}
         >
-          <div className="flex min-h-0 flex-1 snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-4 sm:px-6 md:snap-none">
+          {/* Mobile status pager: tap a status to page to its column. Desktop
+              (md+) shows all four columns at once and hides these tabs. */}
+          <div className="flex gap-1.5 overflow-x-auto px-4 pb-2 sm:px-6 md:hidden">
+            {COLUMN_ORDER.map((status) => {
+              const active = status === activeStatus;
+              return (
+                <button
+                  key={status}
+                  type="button"
+                  onClick={() => setActiveStatus(status)}
+                  aria-pressed={active}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+                    active
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {STATUS_LABELS[status]}
+                  <span
+                    className={cn(
+                      'rounded-full px-1.5 text-[10px] leading-4',
+                      active ? 'bg-primary-foreground/20' : 'bg-background',
+                    )}
+                  >
+                    {columns[status].length}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex min-h-0 flex-1 gap-3 px-4 pb-4 sm:px-6">
             {COLUMN_ORDER.map((status) => (
               <Column
                 key={status}
@@ -290,6 +326,7 @@ export function Board({
                 permCtx={permCtx}
                 showProjectBadge={allProjects}
                 onOpenTask={setOpenTaskId}
+                className={cn(status === activeStatus ? 'flex' : 'hidden', 'md:flex')}
               />
             ))}
           </div>

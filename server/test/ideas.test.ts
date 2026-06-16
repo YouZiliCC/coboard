@@ -449,4 +449,185 @@ describe('ideas / inspiration', () => {
     const res = await ctx.app.inject({ method: 'GET', url: '/api/ideas' });
     expect(res.statusCode).toBe(401);
   });
+
+  // --- Standalone (灵感区) ideas -------------------------------------------
+
+  it('posts a STANDALONE idea (POST /ideas) visible to another user with null context', async () => {
+    const author = await makeUser(ctx);
+    const other = await makeUser(ctx);
+    const authorCookie = await authCookie(ctx, author.id);
+    const otherCookie = await authCookie(ctx, other.id);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(authorCookie),
+      payload: { body: '一个独立灵感' },
+    });
+    expect(created.statusCode).toBe(201);
+    const createdIdea = (created.json() as IdeaResponse).idea;
+    expect(createdIdea.taskId).toBeNull();
+    expect(createdIdea.status).toBe('pending');
+    expect(createdIdea.author.id).toBe(author.id);
+
+    // Another logged-in user (in no projects) sees it with null task/project context.
+    const listRes = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/ideas',
+      headers: headers(otherCookie),
+    });
+    expect(listRes.statusCode).toBe(200);
+    const listed = (listRes.json() as IdeasWithContextResponse).ideas;
+    const standalone = listed.find((i) => i.id === createdIdea.id);
+    expect(standalone).toBeDefined();
+    expect(standalone?.taskId).toBeNull();
+    expect(standalone?.taskTitle).toBeNull();
+    expect(standalone?.projectId).toBeNull();
+    expect(standalone?.projectName).toBeNull();
+    expect(standalone?.body).toBe('一个独立灵感');
+  });
+
+  it('rejects an empty STANDALONE idea body with 400', async () => {
+    const author = await makeUser(ctx);
+    const cookie = await authCookie(ctx, author.id);
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(cookie),
+      payload: { body: '   ' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('requires authentication to post a STANDALONE idea (401)', async () => {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      // The CSRF header is present (so the request reaches auth), but no session.
+      headers: { 'x-requested-with': 'fetch' },
+      payload: { body: '匿名想法' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('lets a global admin adopt a STANDALONE idea and credits the author', async () => {
+    const admin = await makeUser(ctx, { role: 'admin' });
+    const author = await makeUser(ctx, { displayName: 'StandaloneAuthor' });
+    const authorCookie = await authCookie(ctx, author.id);
+    const adminCookie = await authCookie(ctx, admin.id);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(authorCookie),
+      payload: { body: '值得奖励的独立灵感' },
+    });
+    const ideaId = (created.json() as IdeaResponse).idea.id;
+
+    const adoptRes = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/ideas/${ideaId}/adopt`,
+      headers: headers(adminCookie),
+      payload: { rewardPoints: 9 },
+    });
+    expect(adoptRes.statusCode).toBe(200);
+    const adopted = (adoptRes.json() as IdeaResponse).idea;
+    expect(adopted.status).toBe('adopted');
+    expect(adopted.rewardPoints).toBe(9);
+    expect(adopted.adoptedBy).toBe(admin.id);
+
+    // The standalone reward credits the author in the no-filter leaderboard.
+    const lb = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/stats/leaderboard?sort=points',
+      headers: headers(adminCookie),
+    });
+    const entries = (lb.json() as LeaderboardResponse).entries;
+    const authorEntry = entries.find((e) => e.user.displayName === 'StandaloneAuthor');
+    expect(authorEntry).toMatchObject({
+      completedCount: 0,
+      taskPoints: 0,
+      rewardPoints: 9,
+      pointsSum: 9,
+    });
+
+    // And in the author's own /stats/me (own contribution regardless of project).
+    const me = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/stats/me',
+      headers: headers(authorCookie),
+    });
+    expect((me.json() as MyStatsResponse)).toMatchObject({
+      rewardPoints: 9,
+      pointsSum: 9,
+    });
+  });
+
+  it('forbids a non-admin from adopting a STANDALONE idea (403)', async () => {
+    const author = await makeUser(ctx);
+    const other = await makeUser(ctx);
+    const authorCookie = await authCookie(ctx, author.id);
+    const otherCookie = await authCookie(ctx, other.id);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(authorCookie),
+      payload: { body: '不该被普通用户采纳' },
+    });
+    const ideaId = (created.json() as IdeaResponse).idea.id;
+
+    const adoptRes = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/ideas/${ideaId}/adopt`,
+      headers: headers(otherCookie),
+      payload: { rewardPoints: 5 },
+    });
+    expect(adoptRes.statusCode).toBe(403);
+
+    // Even the author themselves cannot adopt their own standalone idea.
+    const selfAdopt = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/ideas/${ideaId}/adopt`,
+      headers: headers(authorCookie),
+      payload: { rewardPoints: 5 },
+    });
+    expect(selfAdopt.statusCode).toBe(403);
+
+    const rows = await ctx.db.select().from(ideas).where(eq(ideas.id, ideaId));
+    expect(rows[0]?.status).toBe('pending');
+    expect(rows[0]?.rewardPoints).toBeNull();
+  });
+
+  it('lets a global admin reject a STANDALONE idea but forbids a non-admin (403)', async () => {
+    const admin = await makeUser(ctx, { role: 'admin' });
+    const author = await makeUser(ctx);
+    const other = await makeUser(ctx);
+    const authorCookie = await authCookie(ctx, author.id);
+    const adminCookie = await authCookie(ctx, admin.id);
+    const otherCookie = await authCookie(ctx, other.id);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/ideas',
+      headers: headers(authorCookie),
+      payload: { body: '会被驳回的独立灵感' },
+    });
+    const ideaId = (created.json() as IdeaResponse).idea.id;
+
+    const nonAdminReject = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/ideas/${ideaId}/reject`,
+      headers: headers(otherCookie),
+    });
+    expect(nonAdminReject.statusCode).toBe(403);
+
+    const rejectRes = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/ideas/${ideaId}/reject`,
+      headers: headers(adminCookie),
+    });
+    expect(rejectRes.statusCode).toBe(200);
+    expect((rejectRes.json() as IdeaResponse).idea.status).toBe('rejected');
+  });
 });
