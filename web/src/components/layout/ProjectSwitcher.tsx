@@ -11,6 +11,7 @@ import {
 import { useProjects } from '../../api/projects';
 import { ALL_PROJECTS } from '../../api/tasks';
 import { cn } from '../../lib/utils';
+import { useHoverMenu } from '../../lib/use-hover-menu';
 
 /**
  * Project switcher (§4, §8). Lists the current user's visible projects (useProjects)
@@ -26,6 +27,7 @@ export function ProjectSwitcher(): JSX.Element {
   const match = useMatch('/board/:projectId');
   const projectId = match?.params.projectId;
   const { data: projects, isLoading } = useProjects();
+  const menu = useHoverMenu();
 
   const isAll = projectId === ALL_PROJECTS;
   const active = projects?.find((p) => p.id === projectId);
@@ -38,8 +40,8 @@ export function ProjectSwitcher(): JSX.Element {
       : (active?.name ?? '选择项目');
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
+    <DropdownMenu open={menu.open} onOpenChange={menu.onOpenChange} modal={false}>
+      <DropdownMenuTrigger asChild {...menu.triggerProps}>
         <button
           type="button"
           className={cn(
@@ -59,7 +61,7 @@ export function ProjectSwitcher(): JSX.Element {
           <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[14rem]">
+      <DropdownMenuContent align="start" className="min-w-[14rem]" {...menu.contentProps}>
         <DropdownMenuLabel>项目</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem

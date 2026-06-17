@@ -12,6 +12,7 @@ import {
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { useAuth } from '../../lib/auth-context';
 import { avatarUrl, cn } from '../../lib/utils';
+import { useHoverMenu } from '../../lib/use-hover-menu';
 
 /**
  * Top navigation bar (§4). Logo, project switcher, primary nav (看板 / 统计 /
@@ -33,6 +34,7 @@ export function TopNav(): JSX.Element {
   // param — read it from the location. Default the 看板 link to the all view.
   const projectId = useMatch('/board/:projectId')?.params.projectId;
   const boardTarget = projectId ?? 'all';
+  const userMenu = useHoverMenu();
 
   const navItems: NavItem[] = [
     {
@@ -95,8 +97,8 @@ export function TopNav(): JSX.Element {
 
         <div className="ml-auto flex items-center gap-2">
           {user && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <DropdownMenu open={userMenu.open} onOpenChange={userMenu.onOpenChange} modal={false}>
+              <DropdownMenuTrigger asChild {...userMenu.triggerProps}>
                 <button
                   type="button"
                   className="flex items-center gap-2 rounded-full p-0.5 transition-colors hover:bg-accent focus:outline-none focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
@@ -110,7 +112,7 @@ export function TopNav(): JSX.Element {
                   />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent>
+              <DropdownMenuContent {...userMenu.contentProps}>
                 <DropdownMenuLabel className="flex max-w-[16rem] flex-col gap-0.5">
                   <span className="truncate text-sm font-medium text-foreground">{user.displayName}</span>
                   <span className="truncate text-xs font-normal text-muted-foreground">
