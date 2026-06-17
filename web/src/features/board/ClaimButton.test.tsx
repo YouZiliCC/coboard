@@ -60,6 +60,8 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     status: 'open',
     points: null,
     priority: 'medium',
+    minClaimants: 1,
+    maxClaimants: null,
     dueDate: null,
     createdBy: 'user-1',
     rank: 'm',

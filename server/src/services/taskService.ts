@@ -186,6 +186,8 @@ export function serializeTask(
     status: row.status,
     points: row.points,
     priority: row.priority,
+    minClaimants: row.minClaimants,
+    maxClaimants: row.maxClaimants,
     dueDate: row.dueDate,
     createdBy: row.createdBy,
     rank: row.rank,
@@ -449,8 +451,12 @@ export async function createTask(
       ? requireAuth(request)
       : (await requireProjectMember(db, request, projectId)).user;
 
+  const minClaimants = input.minClaimants ?? 1;
+  const maxClaimants = input.maxClaimants ?? null;
+  // Dispatching adds exactly one claimant; the task only reaches 进行中 if that one
+  // claimant already meets the lower bound (min === 1), else it waits in 待认领.
   const dispatched = input.assigneeId != null;
-  const status: TaskStatus = dispatched ? 'in_progress' : 'open';
+  const status: TaskStatus = dispatched ? poolStatusFor(1, minClaimants) : 'open';
   const rank = await nextRankForColumn(db, projectId, status);
 
   const [created] = await db
@@ -462,6 +468,8 @@ export async function createTask(
       status,
       points: input.points ?? null,
       priority: input.priority,
+      minClaimants,
+      maxClaimants,
       dueDate: input.dueDate ?? null,
       createdBy: actor.id,
       rank,
@@ -556,11 +564,24 @@ export async function updateTask(
   if (input.dueDate !== undefined) patch.dueDate = input.dueDate;
   if (input.rank !== undefined) patch.rank = input.rank;
 
-  const nextStatus = input.status;
-  const statusChanged = nextStatus !== undefined && nextStatus !== task.status;
+  // Claim-count limits (claim-limits): merge requested bounds with the stored ones,
+  // re-validate min <= max across the merge, then persist whichever were provided.
+  const newMin = input.minClaimants ?? task.minClaimants;
+  const newMax = input.maxClaimants !== undefined ? input.maxClaimants : task.maxClaimants;
+  if (newMax != null && newMax < newMin) {
+    throw validationError('领取人数上限不能小于下限');
+  }
+  if (input.minClaimants !== undefined) patch.minClaimants = input.minClaimants;
+  if (input.maxClaimants !== undefined) patch.maxClaimants = input.maxClaimants;
 
-  if (statusChanged) {
-    const to = nextStatus as TaskStatus;
+  // Resolve the final status. An explicit open↔in_progress move is allowed, but a
+  // move into 进行中 must still meet the lower bound (claim-limits) — an under-min
+  // task must stay in 待认领. When no explicit move is requested but the lower bound
+  // changed, recompute the active-pool status so lowering the bound can advance an
+  // over-min task and raising it drops an under-min task back to 待认领.
+  let targetStatus: TaskStatus = task.status;
+  if (input.status !== undefined && input.status !== task.status) {
+    const to = input.status;
     // Only the direct open↔in_progress moves are allowed via PATCH; deliver/review
     // own the pending_review/done transitions (§3).
     const allowed =
@@ -569,8 +590,22 @@ export async function updateTask(
     if (!allowed) {
       throw validationError('该状态变更需通过交付 / 审阅完成');
     }
-    patch.status = to;
+    if (to === 'in_progress') {
+      const count = (await loadClaimantIds(db, taskId)).length;
+      if (count < newMin) {
+        throw validationError('未达领取人数下限，无法进入「进行中」');
+      }
+    }
+    targetStatus = to;
+  } else if (
+    input.minClaimants !== undefined &&
+    (task.status === 'open' || task.status === 'in_progress')
+  ) {
+    const count = (await loadClaimantIds(db, taskId)).length;
+    targetStatus = poolStatusFor(count, newMin);
   }
+  const statusChanged = targetStatus !== task.status;
+  if (statusChanged) patch.status = targetStatus;
 
   // Apply the optional label REPLACE set (task-labels). Permitted to anyone who may
   // edit the task — the same gate already enforced above.
@@ -596,7 +631,7 @@ export async function updateTask(
       projectId: updated.projectId,
       actorId: actor.id,
       type: 'status_changed',
-      meta: { from: task.status, to: nextStatus },
+      meta: { from: task.status, to: targetStatus },
     }, bus);
   } else {
     // Field-only edit (incl. rank reorder and/or a label set change).
@@ -629,6 +664,15 @@ async function loadClaimantIds(db: Database, taskId: string): Promise<string[]> 
 }
 
 /**
+ * The active-pool status (claim-limits feature): a task with at least `minClaimants`
+ * claimants is `in_progress`; below the floor it stays `open` (待认领, 未达下限). Only
+ * applies while a task is in the claimable pool — deliver/review own the later states.
+ */
+function poolStatusFor(count: number, minClaimants: number): 'open' | 'in_progress' {
+  return count >= minClaimants ? 'in_progress' : 'open';
+}
+
+/**
  * Claim a task (lifecycle v2 §3; no-project tasks §8): add the caller to the
  * claimants set (idempotent) and, if the task is still `open`, move it to
  * `in_progress`. Any project member may claim a project task; any authenticated user
@@ -646,6 +690,15 @@ export async function claimTask(
     throw conflict('该状态的任务不可认领');
   }
 
+  // Enforce the upper bound (claim-limits): a non-claimant cannot join once the
+  // claimant count has reached `maxClaimants` (null = unlimited). Re-claiming is
+  // idempotent and never blocked.
+  const claimantIds = await loadClaimantIds(db, taskId);
+  const alreadyClaimant = claimantIds.includes(actor.id);
+  if (!alreadyClaimant && task.maxClaimants != null && claimantIds.length >= task.maxClaimants) {
+    throw conflict('已达领取人数上限');
+  }
+
   // Idempotent add to the claimants set.
   const inserted = await db
     .insert(taskClaimants)
@@ -655,12 +708,18 @@ export async function claimTask(
 
   let updated = task;
   if (task.status === 'open') {
-    const [row] = await db
-      .update(tasks)
-      .set({ status: 'in_progress' })
-      .where(eq(tasks.id, taskId))
-      .returning();
-    if (row) updated = row;
+    // Only leave 待认领 once the lower bound is met; below it the task stays open
+    // (未达下限) even though it now has some claimants (claim-limits).
+    const count = claimantIds.length + inserted.length;
+    const nextStatus = poolStatusFor(count, task.minClaimants);
+    if (nextStatus !== task.status) {
+      const [row] = await db
+        .update(tasks)
+        .set({ status: nextStatus })
+        .where(eq(tasks.id, taskId))
+        .returning();
+      if (row) updated = row;
+    }
   }
 
   // Only record activity / fan out when the caller was newly added.
@@ -697,6 +756,13 @@ export async function releaseTask(
 ): Promise<Task> {
   const { task, user: actor, isLead } = await loadTaskAccess(db, request, taskId);
 
+  // Releasing only makes sense while a task is in the claimable pool. Blocking it
+  // for pending_review/done keeps the claimant set (and the locked points / deliver
+  // state) intact for review/contribution, and prevents reopening a finished task.
+  if (task.status !== 'open' && task.status !== 'in_progress') {
+    throw conflict('只有待认领或进行中的任务可以退出认领');
+  }
+
   // Default target is the caller (self-release). Removing someone else needs the
   // lead-equivalent: project lead/admin, or the creator/admin of a pool task (§8) —
   // both encoded in `isLead` by requireTaskVisibility.
@@ -714,13 +780,23 @@ export async function releaseTask(
     throw conflict('该用户不是认领者');
   }
 
-  // If no claimants remain, drop back to the open pool (and clear deliver state).
+  // Recompute the pool status (claim-limits). With no claimants left the task drops
+  // back to 待认领 and any deliver state is cleared. While `in_progress`, dropping
+  // below the lower bound also returns it to 待认领 (未达下限). Post-delivery states
+  // (pending_review/done) are left alone — only the active pool re-balances here.
   const remaining = await loadClaimantIds(db, taskId);
   let updated = task;
   if (remaining.length === 0) {
     const [row] = await db
       .update(tasks)
       .set({ status: 'open', deliveredAt: null, deliveredBy: null })
+      .where(eq(tasks.id, taskId))
+      .returning();
+    if (row) updated = row;
+  } else if (task.status === 'in_progress' && remaining.length < task.minClaimants) {
+    const [row] = await db
+      .update(tasks)
+      .set({ status: 'open' })
       .where(eq(tasks.id, taskId))
       .returning();
     if (row) updated = row;
@@ -773,6 +849,14 @@ export async function assignTask(
     throw conflict('已完成的任务不能再派发');
   }
 
+  // Dispatch also respects the upper bound (claim-limits): can't add a new claimant
+  // past `maxClaimants`. Re-assigning an existing claimant is idempotent.
+  const claimantIds = await loadClaimantIds(db, taskId);
+  const alreadyClaimant = claimantIds.includes(input.assigneeId);
+  if (!alreadyClaimant && task.maxClaimants != null && claimantIds.length >= task.maxClaimants) {
+    throw conflict('已达领取人数上限');
+  }
+
   const inserted = await db
     .insert(taskClaimants)
     .values({ taskId, userId: input.assigneeId })
@@ -781,12 +865,16 @@ export async function assignTask(
 
   let updated = task;
   if (task.status === 'open') {
-    const [row] = await db
-      .update(tasks)
-      .set({ status: 'in_progress' })
-      .where(eq(tasks.id, taskId))
-      .returning();
-    if (row) updated = row;
+    const count = claimantIds.length + inserted.length;
+    const nextStatus = poolStatusFor(count, task.minClaimants);
+    if (nextStatus !== task.status) {
+      const [row] = await db
+        .update(tasks)
+        .set({ status: nextStatus })
+        .where(eq(tasks.id, taskId))
+        .returning();
+      if (row) updated = row;
+    }
   }
 
   if (inserted.length > 0) {
@@ -967,11 +1055,14 @@ export async function reviewTask(
     return serializeTaskById(db, updated);
   }
 
-  // reject → back to in_progress; clear deliver state + each claimant's share.
+  // reject → back to the claimable pool; clear deliver state + each claimant's share.
+  // Choose open vs in_progress by the lower bound (claim-limits) so a task that no
+  // longer meets minClaimants returns to 待认领 (未达下限) rather than 进行中.
+  const rejectCount = (await loadClaimantIds(db, taskId)).length;
   const [updated] = await db
     .update(tasks)
     .set({
-      status: 'in_progress',
+      status: poolStatusFor(rejectCount, task.minClaimants),
       deliveredAt: null,
       deliveredBy: null,
       reviewedBy: actor.id,

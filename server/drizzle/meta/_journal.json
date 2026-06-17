@@ -64,6 +64,13 @@
       "when": 1781622085381,
       "tag": "0008_lumpy_gertrude_yorkes",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781685601991,
+      "tag": "0009_rapid_vulture",
+      "breakpoints": true
     }
   ]
 }

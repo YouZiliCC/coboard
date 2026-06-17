@@ -46,6 +46,7 @@ import {
 } from '../../api/tasks';
 import { useActivities, useComments } from '../../api/comments';
 import { ClaimButton } from '../board/ClaimButton';
+import { ClaimLimitBadge } from '../board/ClaimLimitBadge';
 import { DeliverDialog } from '../board/DeliverDialog';
 import { ReviewActions } from '../board/ReviewActions';
 import { dueInfo } from '../board/format';
@@ -272,6 +273,15 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
               认领者
             </span>
             <div className="flex flex-1 flex-col gap-2">
+              {/* Claim-count limits summary (claim-limits) */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                <span>
+                  下限 {task.minClaimants} 人 · 上限{' '}
+                  {task.maxClaimants != null ? `${task.maxClaimants} 人` : '不限'} · 已认领{' '}
+                  {task.claimants.length} 人
+                </span>
+                <ClaimLimitBadge task={task} />
+              </div>
               {task.claimants.length === 0 ? (
                 <span className="text-sm text-muted-foreground">暂无认领者</span>
               ) : (
@@ -370,21 +380,32 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
             <div className="flex items-center gap-3">
               <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">状态</span>
               <div className="flex flex-1 flex-wrap gap-1.5">
-                {STATUSES.map((status) => (
-                  <Button
-                    key={status}
-                    type="button"
-                    variant={task.status === status ? 'primary' : 'outline'}
-                    size="sm"
-                    disabled={task.status === status}
-                    onClick={() =>
-                      patchTask.mutate({ taskId: task.id, patch: { status } })
-                    }
-                  >
-                    {task.status === status && <Check className="h-3.5 w-3.5" aria-hidden />}
-                    {STATUS_LABELS[status]}
-                  </Button>
-                ))}
+                {STATUSES.map((status) => {
+                  // Can't move into 进行中 below the claim lower bound — the task must
+                  // stay in 待认领 (未达下限) until enough people claim (claim-limits).
+                  const blockedByMin =
+                    status === 'in_progress' && task.claimants.length < task.minClaimants;
+                  return (
+                    <Button
+                      key={status}
+                      type="button"
+                      variant={task.status === status ? 'primary' : 'outline'}
+                      size="sm"
+                      disabled={task.status === status || blockedByMin}
+                      title={
+                        blockedByMin
+                          ? `未达领取人数下限（${task.claimants.length}/${task.minClaimants}）`
+                          : undefined
+                      }
+                      onClick={() =>
+                        patchTask.mutate({ taskId: task.id, patch: { status } })
+                      }
+                    >
+                      {task.status === status && <Check className="h-3.5 w-3.5" aria-hidden />}
+                      {STATUS_LABELS[status]}
+                    </Button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -538,6 +559,10 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
   const [description, setDescription] = useState(task.description ?? '');
   const [priority, setPriority] = useState<Priority>(task.priority);
   const [points, setPoints] = useState(task.points != null ? String(task.points) : '');
+  const [minClaimants, setMinClaimants] = useState(String(task.minClaimants));
+  const [maxClaimants, setMaxClaimants] = useState(
+    task.maxClaimants != null ? String(task.maxClaimants) : '',
+  );
   const [dueDate, setDueDate] = useState(task.dueDate ?? '');
   const [labelIds, setLabelIds] = useState<string[]>(task.labels.map((l) => l.id));
   const [error, setError] = useState<string | null>(null);
@@ -550,6 +575,9 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
       description: description.trim() ? description.trim() : null,
       priority,
       points: points.trim() ? Number(points) : null,
+      // Claim limits (claim-limits): min coerced to a number; max null = unlimited.
+      minClaimants: minClaimants.trim() ? Number(minClaimants) : 1,
+      maxClaimants: maxClaimants.trim() ? Number(maxClaimants) : null,
       dueDate: dueDate ? dueDate : null,
       // REPLACE set: the task's labels become exactly the chosen ids.
       labelIds,
@@ -618,6 +646,31 @@ function TaskEditForm({ task, onCancel, onSave, saving }: TaskEditFormProps): JS
             value={dueDate}
             onChange={(e) => setDueDate(e.target.value)}
           />
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid gap-1.5">
+          <Label htmlFor="edit-min-claimants">认领人数下限</Label>
+          <Input
+            id="edit-min-claimants"
+            type="number"
+            min={1}
+            value={minClaimants}
+            onChange={(e) => setMinClaimants(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">达到该人数才进入「进行中」。</p>
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="edit-max-claimants">认领人数上限</Label>
+          <Input
+            id="edit-max-claimants"
+            type="number"
+            min={1}
+            placeholder="留空＝不限"
+            value={maxClaimants}
+            onChange={(e) => setMaxClaimants(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">达到上限后不再接受认领。</p>
         </div>
       </div>
       <div className="grid gap-1.5">

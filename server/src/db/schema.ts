@@ -192,6 +192,12 @@ export const tasks = pgTable(
     }),
     points: integer('points'),
     priority: priorityEnum('priority').notNull().default('medium'),
+    // Claim-count limits (claim-limits feature). `min_claimants` (>= 1, default 1)
+    // is how many claimants are needed before the task leaves 待认领 for 进行中;
+    // below it the task stays open and is flagged 未达下限. `max_claimants` caps how
+    // many may claim (NULL = unlimited). Defaults preserve the pre-feature behaviour.
+    minClaimants: integer('min_claimants').notNull().default(1),
+    maxClaimants: integer('max_claimants'),
     dueDate: date('due_date'),
     createdBy: uuid('created_by')
       .notNull()

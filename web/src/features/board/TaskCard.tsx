@@ -4,6 +4,7 @@ import type { Task } from 'shared';
 import { Badge, Button } from '../../components/ui';
 import { cn } from '../../lib/utils';
 import { ClaimButton } from './ClaimButton';
+import { ClaimLimitBadge } from './ClaimLimitBadge';
 import { LabelChip } from './LabelChip';
 import { ClaimantAvatars } from './ClaimantAvatars';
 import { DeliverDialog } from './DeliverDialog';
@@ -133,9 +134,10 @@ export function TaskCard({
         </div>
       )}
 
-      {/* Footer: due date + claimants */}
+      {/* Footer: due date + claim-limit status + claimants */}
       <div className="mt-1 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <ClaimLimitBadge task={task} />
           {due.label && (
             <span
               className={cn(

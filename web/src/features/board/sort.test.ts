@@ -28,6 +28,8 @@ function task(over: Partial<Task> & { id: string }): Task {
     status: 'open',
     points: null,
     priority: 'medium',
+    minClaimants: 1,
+    maxClaimants: null,
     dueDate: null,
     createdBy: '00000000-0000-0000-0000-000000000001',
     rank: 'm',

@@ -5,6 +5,7 @@ import { Button } from '../../components/ui';
 import { useAuth } from '../../lib/auth-context';
 import { isApiClientError } from '../../api/client';
 import { useClaimTask } from '../../api/tasks';
+import { isClaimFull } from './permissions';
 
 /**
  * Claim control (lifecycle v2 §3/§5). Shown on `open`/`in_progress` cards when the
@@ -46,8 +47,9 @@ export function ClaimButton({
   const claimable = task.status === 'open' || task.status === 'in_progress';
   const alreadyClaimant = !!user && task.claimants.some((c) => c.userId === user.id);
 
-  // Only meaningful for a claimable task the logged-in user hasn't already claimed.
-  if (!user || !claimable || alreadyClaimant) {
+  // Only meaningful for a claimable, not-yet-full task the user hasn't claimed yet
+  // (claim-limits: a full task offers no claim affordance).
+  if (!user || !claimable || alreadyClaimant || isClaimFull(task)) {
     return null;
   }
 

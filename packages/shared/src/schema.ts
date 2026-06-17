@@ -158,6 +158,14 @@ export const taskSchema = z.object({
   status: taskStatusSchema,
   points: z.number().int().nonnegative().nullable(),
   priority: prioritySchema,
+  /**
+   * Claim-count limits (claim-limits feature). `minClaimants` (>= 1) is the lower
+   * bound: while the claimant count is below it the task stays in 待认领 (open) and
+   * is flagged 未达下限; reaching it advances the task to 进行中. `maxClaimants`
+   * (null = unlimited) caps how many users may claim.
+   */
+  minClaimants: z.number().int(),
+  maxClaimants: z.number().int().nullable(),
   dueDate: dateOnlySchema.nullable(),
   createdBy: uuidSchema,
   rank: z.string(),
@@ -618,19 +626,42 @@ export type TaskResponse = z.infer<typeof taskResponseSchema>;
  * absent the task is a no-project / task-pool task (§8). The legacy per-project route
  * ignores the body `projectId` and uses its path param.
  */
-export const createTaskInputSchema = z.object({
-  title: z.string().trim().min(1, '标题不能为空').max(200),
-  description: z.string().max(20000).optional(),
-  priority: prioritySchema.default('medium'),
-  points: z.number().int().nonnegative().max(1000).nullable().optional(),
-  dueDate: dateOnlySchema.nullable().optional(),
-  /** Optionally dispatch on creation; moves task to in_progress. */
-  assigneeId: uuidSchema.nullable().optional(),
-  /** Owning project (§8); omit/null to create a no-project (pool) task. */
-  projectId: uuidSchema.nullable().optional(),
-  /** Optional label set (task-labels): the task's labels become exactly these. */
-  labelIds: labelIdsSchema.optional(),
-});
+/**
+ * Claim-count bounds (claim-limits feature). A task needs at least `minClaimants`
+ * claimants to enter 进行中; below it the task stays in 待领取 (未达下限).
+ * `maxClaimants` caps how many users may claim (null = unlimited). Both are bounded
+ * to a sane range so the UI/DB never see absurd values.
+ */
+export const MIN_CLAIMANTS_FLOOR = 1;
+export const MAX_CLAIMANTS_CAP = 50;
+export const claimantBoundSchema = z
+  .number()
+  .int()
+  .min(MIN_CLAIMANTS_FLOOR, `不能小于 ${MIN_CLAIMANTS_FLOOR}`)
+  .max(MAX_CLAIMANTS_CAP, `不能大于 ${MAX_CLAIMANTS_CAP}`);
+
+export const createTaskInputSchema = z
+  .object({
+    title: z.string().trim().min(1, '标题不能为空').max(200),
+    description: z.string().max(20000).optional(),
+    priority: prioritySchema.default('medium'),
+    points: z.number().int().nonnegative().max(1000).nullable().optional(),
+    /** Lower bound on claimants (>= 1). Defaults to 1 (current behaviour). */
+    minClaimants: claimantBoundSchema.default(MIN_CLAIMANTS_FLOOR),
+    /** Upper bound on claimants; omit/null to leave the task unlimited. */
+    maxClaimants: claimantBoundSchema.nullable().optional(),
+    dueDate: dateOnlySchema.nullable().optional(),
+    /** Optionally dispatch on creation; moves task to in_progress. */
+    assigneeId: uuidSchema.nullable().optional(),
+    /** Owning project (§8); omit/null to create a no-project (pool) task. */
+    projectId: uuidSchema.nullable().optional(),
+    /** Optional label set (task-labels): the task's labels become exactly these. */
+    labelIds: labelIdsSchema.optional(),
+  })
+  .refine((v) => v.maxClaimants == null || v.maxClaimants >= (v.minClaimants ?? MIN_CLAIMANTS_FLOOR), {
+    message: '领取人数上限不能小于下限',
+    path: ['maxClaimants'],
+  });
 export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 
 /** PATCH /tasks/:id — edit fields / status / rank. */
@@ -641,6 +672,10 @@ export const updateTaskInputSchema = z
     status: taskStatusSchema.optional(),
     priority: prioritySchema.optional(),
     points: z.number().int().nonnegative().max(1000).nullable().optional(),
+    /** Lower bound on claimants (>= 1). */
+    minClaimants: claimantBoundSchema.optional(),
+    /** Upper bound on claimants; null clears it (unlimited). */
+    maxClaimants: claimantBoundSchema.nullable().optional(),
     dueDate: dateOnlySchema.nullable().optional(),
     /** Lexicographic rank key for intra-column ordering. */
     rank: z.string().min(1).optional(),
@@ -652,7 +687,12 @@ export const updateTaskInputSchema = z
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: '至少修改一个字段',
-  });
+  })
+  .refine(
+    (v) =>
+      !(v.minClaimants != null && v.maxClaimants != null) || v.maxClaimants >= v.minClaimants,
+    { message: '领取人数上限不能小于下限', path: ['maxClaimants'] },
+  );
 export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
 
 /** POST /tasks/:id/assign — lead/admin dispatch (adds the user to claimants). */

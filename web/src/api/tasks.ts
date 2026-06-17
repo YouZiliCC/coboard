@@ -257,10 +257,23 @@ export function usePatchTask(
       // `labels` objects — strip it from the optimistic spread (the server returns
       // the resolved label objects, reconciled on settle).
       const { labelIds: _labelIds, ...optimistic } = patch;
-      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
-        ...task,
-        ...optimistic,
-      }));
+      return applyOptimisticTask(queryClient, projectId, taskId, (task) => {
+        const next = { ...task, ...optimistic };
+        // Mirror the server's claim-limit recompute: when a patch changes the lower
+        // bound without an explicit status move, an open/in_progress task's column
+        // depends on whether its claimant count still meets the (new) min. Recompute
+        // here so the card doesn't briefly flicker into the wrong column before the
+        // server response reconciles.
+        if (
+          optimistic.status === undefined &&
+          optimistic.minClaimants !== undefined &&
+          (task.status === 'open' || task.status === 'in_progress')
+        ) {
+          next.status =
+            task.claimants.length >= next.minClaimants ? 'in_progress' : 'open';
+        }
+        return next;
+      });
     },
     onError: (_err, { taskId }, context) => {
       restoreSnapshot(queryClient, projectId, taskId, context);
@@ -291,10 +304,8 @@ export function useClaimTask(
     onMutate: async (taskId) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
       await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
-      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
-        ...task,
-        status: task.status === 'open' ? 'in_progress' : task.status,
-        claimants: currentUser
+      return applyOptimisticTask(queryClient, projectId, taskId, (task) => {
+        const claimants = currentUser
           ? addClaimant(task, {
               userId: currentUser.id,
               displayName: currentUser.displayName,
@@ -303,8 +314,15 @@ export function useClaimTask(
               points: null,
               claimedAt: new Date().toISOString(),
             })
-          : task.claimants,
-      }));
+          : task.claimants;
+        // Only leave 待认领 once the lower bound is met (claim-limits); below it the
+        // task stays open (未达下限) even with some claimants.
+        const status =
+          task.status === 'open' && claimants.length >= task.minClaimants
+            ? 'in_progress'
+            : task.status;
+        return { ...task, status, claimants };
+      });
     },
     onError: (_err, taskId, context) => {
       restoreSnapshot(queryClient, projectId, taskId, context);
@@ -342,11 +360,15 @@ export function useReleaseTask(
         const claimants = target
           ? task.claimants.filter((c) => c.userId !== target)
           : task.claimants;
-        return {
-          ...task,
-          claimants,
-          status: claimants.length === 0 ? 'open' : task.status,
-        };
+        // Drop back to 待认领 with no claimants, or when an in_progress task falls
+        // below its lower bound (claim-limits).
+        const status =
+          claimants.length === 0
+            ? 'open'
+            : task.status === 'in_progress' && claimants.length < task.minClaimants
+              ? 'open'
+              : task.status;
+        return { ...task, claimants, status };
       });
     },
     onError: (_err, { taskId }, context) => {
@@ -379,10 +401,8 @@ export function useAssignTask(
     onMutate: async ({ taskId, assigneeId, assignee }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.board(projectId) });
       await queryClient.cancelQueries({ queryKey: queryKeys.task(taskId) });
-      return applyOptimisticTask(queryClient, projectId, taskId, (task) => ({
-        ...task,
-        status: task.status === 'open' ? 'in_progress' : task.status,
-        claimants: assignee
+      return applyOptimisticTask(queryClient, projectId, taskId, (task) => {
+        const claimants = assignee
           ? addClaimant(task, {
               userId: assigneeId,
               displayName: assignee.displayName,
@@ -391,8 +411,14 @@ export function useAssignTask(
               points: null,
               claimedAt: new Date().toISOString(),
             })
-          : task.claimants,
-      }));
+          : task.claimants;
+        // Mirror claim: only advance past 待认领 once the lower bound is met.
+        const status =
+          task.status === 'open' && claimants.length >= task.minClaimants
+            ? 'in_progress'
+            : task.status;
+        return { ...task, status, claimants };
+      });
     },
     onError: (_err, { taskId }, context) => {
       restoreSnapshot(queryClient, projectId, taskId, context);

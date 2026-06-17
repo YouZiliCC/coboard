@@ -313,6 +313,55 @@ describe('POST /tasks/:id/claim', () => {
   });
 });
 
+describe('POST /tasks/:id/claim — claim limits (claim-limits)', () => {
+  const claim = (taskId: string, u: SeededUser) =>
+    ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/claim`,
+      headers: { cookie: u.cookie, ...CSRF },
+    });
+
+  it('keeps an under-min task in 待认领 until the lower bound is met', async () => {
+    const a = await seedUser('member');
+    const b = await seedUser('member');
+    const c = await seedUser('member');
+    const projectId = await seedProject(a.id);
+    for (const u of [a, b, c]) await addMember(projectId, u.id, 'member');
+    const taskId = await seedTask({ projectId, createdBy: a.id, minClaimants: 3 });
+
+    const r1 = await claim(taskId, a);
+    expect((r1.json() as { task: Task }).task.status).toBe('open'); // 1/3 未达下限
+    const r2 = await claim(taskId, b);
+    expect((r2.json() as { task: Task }).task.status).toBe('open'); // 2/3 未达下限
+    const r3 = await claim(taskId, c);
+    expect((r3.json() as { task: Task }).task.status).toBe('in_progress'); // 3/3 达标
+  });
+
+  it('rejects a new claim once the upper bound is reached', async () => {
+    const a = await seedUser('member');
+    const b = await seedUser('member');
+    const c = await seedUser('member');
+    const projectId = await seedProject(a.id);
+    for (const u of [a, b, c]) await addMember(projectId, u.id, 'member');
+    const taskId = await seedTask({ projectId, createdBy: a.id, maxClaimants: 2 });
+
+    expect((await claim(taskId, a)).statusCode).toBe(200);
+    expect((await claim(taskId, b)).statusCode).toBe(200);
+    expect((await claim(taskId, c)).statusCode).toBe(409); // 已达领取人数上限
+  });
+
+  it('still lets an existing claimant re-claim at the upper bound (idempotent)', async () => {
+    const a = await seedUser('member');
+    const b = await seedUser('member');
+    const projectId = await seedProject(a.id);
+    for (const u of [a, b]) await addMember(projectId, u.id, 'member');
+    const taskId = await seedTask({ projectId, createdBy: a.id, maxClaimants: 2 });
+    await claim(taskId, a);
+    await claim(taskId, b); // full
+    expect((await claim(taskId, a)).statusCode).toBe(200);
+  });
+});
+
 describe('POST /tasks/:id/release', () => {
   it('lets a sole claimant release → task returns to open with no claimants', async () => {
     const u = await seedUser('member');
@@ -359,6 +408,50 @@ describe('POST /tasks/:id/release', () => {
     const { task } = res.json() as { task: Task };
     expect(task.status).toBe('in_progress');
     expect(task.claimants.map((c) => c.userId)).toEqual([b.id]);
+  });
+
+  it('drops back to 待认领 when a release leaves claimants below the lower bound (claim-limits)', async () => {
+    const a = await seedUser('member');
+    const b = await seedUser('member');
+    const projectId = await seedProject(a.id);
+    await addMember(projectId, a.id, 'member');
+    await addMember(projectId, b.id, 'member');
+    const taskId = await seedTask({
+      projectId,
+      createdBy: a.id,
+      status: 'in_progress',
+      minClaimants: 2,
+    });
+    await seedClaimant(taskId, a.id);
+    await seedClaimant(taskId, b.id);
+
+    // One of two claimants leaves → 1 remains < min 2 → returns to 待认领.
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/release`,
+      headers: { cookie: b.cookie, ...CSRF },
+    });
+    expect(res.statusCode).toBe(200);
+    const { task } = res.json() as { task: Task };
+    expect(task.status).toBe('open');
+    expect(task.claimants.map((c) => c.userId)).toEqual([a.id]);
+  });
+
+  it('refuses to release a done task (keeps the completed claimant record intact)', async () => {
+    const u = await seedUser('member');
+    const projectId = await seedProject(u.id);
+    await addMember(projectId, u.id, 'member');
+    const taskId = await seedTask({ projectId, createdBy: u.id, status: 'done' });
+    await seedClaimant(taskId, u.id, 5);
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/release`,
+      headers: { cookie: u.cookie, ...CSRF },
+    });
+    expect(res.statusCode).toBe(409);
+    const row = await getTaskRow(taskId);
+    expect(row?.status).toBe('done'); // unchanged
   });
 
   it('lets a lead remove another claimant via userId', async () => {
@@ -450,11 +543,12 @@ describe('POST /tasks/:id/assign (dispatch)', () => {
 });
 
 describe('PATCH /tasks/:id (status transitions)', () => {
-  it('allows the direct open → in_progress board move', async () => {
+  it('allows the direct open → in_progress board move when the lower bound is met', async () => {
     const u = await seedUser('member');
     const projectId = await seedProject(u.id);
     await addMember(projectId, u.id, 'member');
     const taskId = await seedTask({ projectId, createdBy: u.id, status: 'open' });
+    await seedClaimant(taskId, u.id); // 1 claimant ≥ default min 1
 
     const res = await ctx.app.inject({
       method: 'PATCH',
@@ -465,6 +559,23 @@ describe('PATCH /tasks/:id (status transitions)', () => {
     expect(res.statusCode).toBe(200);
     const { task } = res.json() as { task: Task };
     expect(task.status).toBe('in_progress');
+  });
+
+  it('rejects a manual open → in_progress move below the lower bound (claim-limits)', async () => {
+    const u = await seedUser('member');
+    const projectId = await seedProject(u.id);
+    await addMember(projectId, u.id, 'member');
+    // minClaimants 2 with no claimants → must stay in 待认领.
+    const taskId = await seedTask({ projectId, createdBy: u.id, status: 'open', minClaimants: 2 });
+
+    const res = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/tasks/${taskId}`,
+      headers: { cookie: u.cookie, ...CSRF },
+      payload: { status: 'in_progress' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((await getTaskRow(taskId))?.status).toBe('open');
   });
 
   it('allows the direct in_progress → open board move', async () => {

@@ -80,13 +80,25 @@ export function canRelease(ctx: TaskPermissionContext, task: Task): boolean {
   return isManager(ctx, task) && task.claimants.length > 0;
 }
 
+/** Is the task at its claim capacity (claim-limits)? null max ⇒ never full. */
+export function isClaimFull(task: Task): boolean {
+  return task.maxClaimants != null && task.claimants.length >= task.maxClaimants;
+}
+
+/** Is the task still below its lower claim bound (claim-limits, 未达下限)? */
+export function isBelowMinClaimants(task: Task): boolean {
+  return task.claimants.length < task.minClaimants;
+}
+
 /**
- * Can the user claim this task? any member, when it's open / in_progress and they
- * are not already a claimant (lifecycle v2 §3).
+ * Can the user claim this task? any member, when it's open / in_progress, they are
+ * not already a claimant, and the upper claim bound has not been reached
+ * (lifecycle v2 §3; claim-limits).
  */
 export function canClaim(ctx: TaskPermissionContext, task: Task): boolean {
   if (!ctx.user) return false;
   if (task.status !== 'open' && task.status !== 'in_progress') return false;
+  if (isClaimFull(task)) return false;
   return !isClaimant(ctx, task);
 }
 

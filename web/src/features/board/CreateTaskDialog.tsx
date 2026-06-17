@@ -44,6 +44,10 @@ interface FormValues {
   description: string;
   priority: Priority;
   points: string;
+  /** Claim-count lower bound (>= 1); below it the task waits in 待认领. */
+  minClaimants: string;
+  /** Claim-count upper bound; empty = unlimited. */
+  maxClaimants: string;
   dueDate: string;
   assigneeId: string;
 }
@@ -95,6 +99,8 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
       description: '',
       priority: 'medium',
       points: '',
+      minClaimants: '1',
+      maxClaimants: '',
       dueDate: '',
       assigneeId: UNASSIGNED,
     },
@@ -113,14 +119,21 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
 
   const onSubmit = handleSubmit((values) => {
     // Build the API payload, normalizing optional/empty fields.
+    // Claim limits (claim-limits): min defaults to 1; an invalid/garbage value is
+    // passed through so the shared schema reports it. Max omitted = unlimited.
+    const min = values.minClaimants.trim() === '' ? 1 : Number(values.minClaimants);
     const payload: CreateTaskInput = {
       title: values.title.trim(),
       priority: values.priority,
+      minClaimants: min,
     };
     if (values.description.trim()) payload.description = values.description.trim();
     if (values.points.trim()) {
       const pts = Number(values.points);
       if (Number.isInteger(pts) && pts >= 0) payload.points = pts;
+    }
+    if (values.maxClaimants.trim()) {
+      payload.maxClaimants = Number(values.maxClaimants);
     }
     if (values.dueDate) payload.dueDate = values.dueDate;
     if (labelIds.length > 0) payload.labelIds = labelIds;
@@ -135,6 +148,10 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
     if (!parsed.success) {
       const titleIssue = parsed.error.issues.find((iss) => iss.path[0] === 'title');
       if (titleIssue) setError('title', { message: titleIssue.message });
+      const minIssue = parsed.error.issues.find((iss) => iss.path[0] === 'minClaimants');
+      if (minIssue) setError('minClaimants', { message: minIssue.message });
+      const maxIssue = parsed.error.issues.find((iss) => iss.path[0] === 'maxClaimants');
+      if (maxIssue) setError('maxClaimants', { message: maxIssue.message });
       return;
     }
 
@@ -249,6 +266,41 @@ export function CreateTaskDialog({ projectId }: CreateTaskDialogProps): JSX.Elem
                 placeholder="如 3"
                 {...register('points')}
               />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="task-min-claimants">认领人数下限</Label>
+              <Input
+                id="task-min-claimants"
+                type="number"
+                min={1}
+                inputMode="numeric"
+                placeholder="默认 1"
+                invalid={!!errors.minClaimants}
+                {...register('minClaimants')}
+              />
+              <p className="text-xs text-muted-foreground">达到该人数才进入「进行中」，否则停留在「待认领」。</p>
+              {errors.minClaimants && (
+                <p className="text-xs text-destructive">{errors.minClaimants.message}</p>
+              )}
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="task-max-claimants">认领人数上限（选填）</Label>
+              <Input
+                id="task-max-claimants"
+                type="number"
+                min={1}
+                inputMode="numeric"
+                placeholder="留空＝不限"
+                invalid={!!errors.maxClaimants}
+                {...register('maxClaimants')}
+              />
+              <p className="text-xs text-muted-foreground">达到上限后不再接受新的认领。</p>
+              {errors.maxClaimants && (
+                <p className="text-xs text-destructive">{errors.maxClaimants.message}</p>
+              )}
             </div>
           </div>
 
