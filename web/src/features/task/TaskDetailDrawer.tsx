@@ -381,52 +381,38 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
                 )}
               </div>
             </div>
+          </div>
 
-            {/* 交付人 (deliverer) — who submitted the task for review (deliveredBy). */}
-            {task.deliverer && (
-              <div className="flex items-center gap-3">
-                <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">
-                  交付人
-                </span>
-                <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
-                  <Avatar
-                    name={task.deliverer.displayName}
-                    color={task.deliverer.avatarColor}
-                    imageUrl={task.deliverer.hasAvatar ? avatarUrl(task.deliverer.id) : undefined}
-                    size="xs"
-                  />
+          {/* 交付人 / 审阅人 — their own compact, tightly-stacked rows (no avatar / wide
+              label column) below the claimants so the review/deliver result stays
+              vertical and doesn't eat space. 审阅人 is hidden while pending_review (a
+              stale reviewer from an earlier reject would otherwise show). */}
+          {(task.deliverer || (task.reviewer && task.status !== 'pending_review')) && (
+            <div className="flex flex-col gap-1 text-xs">
+              {task.deliverer && (
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="w-12 shrink-0 font-medium text-muted-foreground">交付人</span>
                   <span className="min-w-0 truncate text-foreground">
                     {task.deliverer.displayName}
                   </span>
                 </div>
-              </div>
-            )}
-
-            {/* 审阅人 (reviewer) — the review result's reviewer. Shown once a task has
-                been reviewed (done = 通过; reverted to 进行中/待认领 = 驳回); hidden while
-                pending_review so a stale reviewer from an earlier reject isn't shown. */}
-            {task.reviewer && task.status !== 'pending_review' && (
-              <div className="flex items-center gap-3">
-                <span className="w-16 shrink-0 text-xs font-medium text-muted-foreground">
-                  审阅人
-                </span>
-                <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
-                  <Avatar
-                    name={task.reviewer.displayName}
-                    color={task.reviewer.avatarColor}
-                    imageUrl={task.reviewer.hasAvatar ? avatarUrl(task.reviewer.id) : undefined}
-                    size="xs"
-                  />
+              )}
+              {task.reviewer && task.status !== 'pending_review' && (
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="w-12 shrink-0 font-medium text-muted-foreground">审阅人</span>
                   <span className="min-w-0 truncate text-foreground">
                     {task.reviewer.displayName}
                   </span>
-                  <Badge variant={task.status === 'done' ? 'success' : 'neutral'} className="shrink-0">
+                  <Badge
+                    variant={task.status === 'done' ? 'success' : 'neutral'}
+                    className="shrink-0"
+                  >
                     {task.status === 'done' ? '通过' : '驳回'}
                   </Badge>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {/* Status quick-move (open ↔ in_progress only; editable) */}
           {editable && (task.status === 'open' || task.status === 'in_progress') && (
