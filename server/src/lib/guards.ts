@@ -81,17 +81,22 @@ export async function requireProjectMember(
     )
     .limit(1);
   const membership = rows[0];
+  // A global admin is lead-equivalent on EVERY project (§6.3) — including ones they
+  // happen to be enrolled in with a lower membership role. Resolve their role to
+  // 'lead' regardless, so lead-gated actions (review, assign, manage members) don't
+  // 403 just because an admin is also a plain member of the project.
+  const isGlobalAdmin = user.role === 'admin';
 
   if (membership) {
     return {
       user,
       project,
-      projectRole: membership.role,
+      projectRole: isGlobalAdmin ? 'lead' : membership.role,
       isMemberRow: true,
     };
   }
 
-  if (user.role === 'admin') {
+  if (isGlobalAdmin) {
     return { user, project, projectRole: 'lead', isMemberRow: false };
   }
 

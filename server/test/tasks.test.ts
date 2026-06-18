@@ -856,6 +856,35 @@ describe('deliver → review lifecycle (§3)', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('lets a global admin who is only a plain project member approve (regression)', async () => {
+    const lead = await seedUser('member');
+    const worker = await seedUser('member');
+    const adminMember = await seedUser('admin'); // global admin…
+    const projectId = await seedProject(lead.id);
+    await addMember(projectId, lead.id, 'lead');
+    await addMember(projectId, worker.id, 'member');
+    await addMember(projectId, adminMember.id, 'member'); // …enrolled as a plain member
+    const taskId = await seedTask({ projectId, createdBy: lead.id, status: 'in_progress', points: 10 });
+    await seedClaimant(taskId, worker.id);
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/deliver`,
+      headers: { cookie: worker.cookie, ...CSRF },
+      payload: { allocations: [{ userId: worker.id, points: 10 }] },
+    });
+
+    // A global admin is lead-equivalent everywhere — being a plain member of the
+    // project must not strip that (previously 403 「需要项目负责人权限」).
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/review`,
+      headers: { cookie: adminMember.cookie, ...CSRF },
+      payload: { decision: 'approve' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { task: Task }).task.status).toBe('done');
+  });
+
   it('rejects delivering a task that is not in_progress', async () => {
     const { a, b, taskId } = await seedDeliverable({ points: 10 });
     // Move it to pending_review first.
