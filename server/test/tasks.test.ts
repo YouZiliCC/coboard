@@ -674,6 +674,10 @@ describe('deliver → review lifecycle (§3)', () => {
     expect(task.status).toBe('pending_review');
     expect(task.deliveredBy).toBe(a.id);
     expect(task.deliveredAt).not.toBeNull();
+    // The 交付人 (deliverer) summary is resolved on a pending_review task too (not
+    // only once done), so the UI can show the submitter while it awaits review.
+    expect(task.deliverer?.id).toBe(a.id);
+    expect(typeof task.deliverer?.displayName).toBe('string');
     const shares = Object.fromEntries(task.claimants.map((c) => [c.userId, c.points]));
     expect(shares[a.id]).toBe(6);
     expect(shares[b.id]).toBe(4);

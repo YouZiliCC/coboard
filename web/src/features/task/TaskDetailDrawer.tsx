@@ -259,6 +259,24 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
           showRevoke ||
           (task.status === 'pending_review' && !showReview)) && (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-secondary/30 p-3">
+            {/* Submitter line — shown to everyone (reviewer or not) while a task awaits
+                review, on its own row, so 待审阅 tasks prominently show 谁交付的. */}
+            {task.status === 'pending_review' && (
+              <div className="flex w-full min-w-0 items-center gap-1.5 text-sm">
+                <PackageCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                {task.deliverer ? (
+                  <>
+                    <span className="shrink-0 text-muted-foreground">提交人</span>
+                    <span className="min-w-0 truncate font-medium text-foreground">
+                      {task.deliverer.displayName}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">· 已交付，等待审阅</span>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">已交付，等待审阅</span>
+                )}
+              </div>
+            )}
             {showDeliver && (
               <Button type="button" size="sm" onClick={() => setDeliverOpen(true)}>
                 <PackageCheck className="h-4 w-4" aria-hidden />
@@ -267,9 +285,6 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
             )}
             {showReview && <ReviewActions task={task} projectId={projectId} size="md" />}
             {showRevoke && <RevokeApprovalButton task={task} projectId={projectId} size="md" />}
-            {task.status === 'pending_review' && !showReview && (
-              <span className="text-sm text-muted-foreground">已交付，等待项目负责人审阅。</span>
-            )}
           </div>
         )}
 
@@ -383,11 +398,12 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
             </div>
           </div>
 
-          {/* 交付人 / 审阅人 — their own compact, tightly-stacked rows (no avatar / wide
-              label column) below the claimants so the review/deliver result stays
-              vertical and doesn't eat space. 审阅人 is hidden while pending_review (a
-              stale reviewer from an earlier reject would otherwise show). */}
-          {(task.deliverer || (task.reviewer && task.status !== 'pending_review')) && (
+          {/* 交付人 / 审阅人 — compact, tightly-stacked rows below the claimants. Only
+              shown once a task has LEFT review (done, or reverted to 进行中/待认领 after
+              a 驳回); while pending_review the submitter is shown prominently in the
+              review bar above instead, and a stale reviewer from an earlier reject is
+              not surfaced. */}
+          {task.status !== 'pending_review' && (task.deliverer || task.reviewer) && (
             <div className="flex flex-col gap-1 text-xs">
               {task.deliverer && (
                 <div className="flex min-w-0 items-center gap-1.5">
@@ -397,7 +413,7 @@ function DrawerInner({ taskId, projectId, initialTab, onClose }: DrawerInnerProp
                   </span>
                 </div>
               )}
-              {task.reviewer && task.status !== 'pending_review' && (
+              {task.reviewer && (
                 <div className="flex min-w-0 items-center gap-1.5">
                   <span className="w-12 shrink-0 font-medium text-muted-foreground">审阅人</span>
                   <span className="min-w-0 truncate text-foreground">
