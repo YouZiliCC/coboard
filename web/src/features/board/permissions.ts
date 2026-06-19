@@ -103,17 +103,30 @@ export function canDeliver(ctx: TaskPermissionContext, task: Task): boolean {
 }
 
 /**
- * Can the user review this task? while pending_review, the manager tier (v2 §3,
- * §8) — admin/lead for a project task, admin/creator for a pool task.
+ * The reviewer tier — who may approve / reject / 撤销通过 a task (v2 §3, §8). Unlike
+ * {@link isManager}, the CREATOR of a pool task is NOT a reviewer: a pool task has no
+ * project lead, so only a global admin may review it (a non-lead must not approve a
+ * task merely because they created it). Project task: global admin or the project lead.
  */
-export function canReview(ctx: TaskPermissionContext, task: Task): boolean {
-  return task.status === 'pending_review' && isManager(ctx, task);
+function isReviewer(ctx: TaskPermissionContext, task: Task): boolean {
+  if (!ctx.user) return false;
+  if (ctx.user.role === 'admin') return true;
+  if (isPoolTask(task)) return false;
+  return ctx.projectRole === 'lead';
 }
 
 /**
- * Can the user 撤销通过 (revoke approval) of this task? a manager, while the task is
- * `done` — sends it back to 待审阅 for re-review.
+ * Can the user review this task? while pending_review, the reviewer tier (v2 §3, §8)
+ * — admin/lead for a project task, admin only for a pool task.
+ */
+export function canReview(ctx: TaskPermissionContext, task: Task): boolean {
+  return task.status === 'pending_review' && isReviewer(ctx, task);
+}
+
+/**
+ * Can the user 撤销通过 (revoke approval) of this task? the reviewer tier, while the
+ * task is `done` — sends it back to 待审阅 for re-review.
  */
 export function canRevokeApproval(ctx: TaskPermissionContext, task: Task): boolean {
-  return task.status === 'done' && isManager(ctx, task);
+  return task.status === 'done' && isReviewer(ctx, task);
 }

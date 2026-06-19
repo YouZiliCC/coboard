@@ -181,10 +181,12 @@ export function canEditNoProjectTask(user: UserRow, task: TaskRow): boolean {
 }
 
 /**
- * Whether `user` may review (approve/reject) a no-project task (§8): the task
- * creator OR a global admin (no project lead exists for pool tasks).
+ * Whether `user` may review (approve/reject/revoke) a no-project (pool) task (§8).
+ * A pool task has no project lead, so its CREATOR is not a reviewer — only a global
+ * admin may review it. (A non-lead must not be able to approve a task merely because
+ * they created it; that would let non-leads complete tasks and self-credit points.)
  */
-export function canReviewNoProjectTask(user: UserRow, task: TaskRow): boolean {
-  return user.role === 'admin' || task.createdBy === user.id;
+export function canReviewNoProjectTask(user: UserRow): boolean {
+  return user.role === 'admin';
 }
 

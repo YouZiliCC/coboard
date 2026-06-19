@@ -1103,10 +1103,11 @@ export async function reviewTask(
 
   let actor: UserRow;
   if (task.projectId === null) {
-    // No-project (pool) task → creator or global admin (§8).
+    // No-project (pool) task → global admin only (no project lead exists; the
+    // creator is not a reviewer, §8).
     actor = requireAuth(request);
-    if (!canReviewNoProjectTask(actor, task)) {
-      throw forbidden('只有任务创建者或管理员可以审阅');
+    if (!canReviewNoProjectTask(actor)) {
+      throw forbidden('无项目任务只有管理员可以审阅');
     }
   } else {
     // Project task → lead/admin only, via the project lead guard.
@@ -1180,8 +1181,8 @@ export async function reviewTask(
  * 进行中 via the normal review flow. The delivery stands (deliver state + each
  * claimant's points are kept); only `completed_at`/`reviewed_by` are cleared, so the
  * task no longer counts toward contribution stats until re-approved. Permitted to the
- * same manager tier as review (project lead/admin, or the creator/admin of a pool
- * task, §8). Records `reopened`.
+ * same reviewer tier as review (project lead/admin for a project task; global admin
+ * only for a pool task, §8). Records `reopened`.
  */
 export async function revokeApproval(
   db: Database,
@@ -1193,9 +1194,10 @@ export async function revokeApproval(
 
   let actor: UserRow;
   if (task.projectId === null) {
+    // No-project (pool) task → global admin only (same reviewer tier as review, §8).
     actor = requireAuth(request);
-    if (!canReviewNoProjectTask(actor, task)) {
-      throw forbidden('只有任务创建者或管理员可以撤销通过');
+    if (!canReviewNoProjectTask(actor)) {
+      throw forbidden('无项目任务只有管理员可以撤销通过');
     }
   } else {
     actor = (await requireProjectLead(db, request, task.projectId)).user;

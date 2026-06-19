@@ -17,7 +17,8 @@ import { createTestContext } from './helpers.js';
 /**
  * No-project tasks / task pool + all-projects query feature tests (§8). Covers the
  * unified create endpoint, the shared task-pool visibility, the §8 permission matrix
- * (claim/deliver any user; review = creator or admin; forbidden for a random member),
+ * (claim/deliver any user; review/revoke = global admin only — no project lead exists,
+ * so the creator is not a reviewer; edit/delete = creator or admin),
  * the all-projects union with project context, and that a completed pool task counts
  * toward contribution stats.
  *
@@ -306,7 +307,7 @@ describe('pool task lifecycle (§8 permissions)', () => {
     expect(task.deliveredBy).toBe(worker.id);
   });
 
-  it('lets the creator review (approve) a delivered pool task', async () => {
+  it('forbids the (non-admin) creator from reviewing their own pool task — pool tasks are admin-reviewed only', async () => {
     const creator = await seedUser('member');
     const worker = await seedUser('member');
     const taskId = await seedTask({
@@ -324,11 +325,42 @@ describe('pool task lifecycle (§8 permissions)', () => {
       headers: { cookie: creator.cookie, ...CSRF },
       payload: { decision: 'approve' },
     });
-    expect(res.statusCode).toBe(200);
-    const { task } = res.json() as { task: Task };
-    expect(task.status).toBe('done');
-    expect(task.completedAt).not.toBeNull();
-    expect(task.reviewedBy).toBe(creator.id);
+    // A pool task has no project lead, so its creator (a non-lead) must NOT be able
+    // to approve it — only a global admin may. The task stays pending_review.
+    expect(res.statusCode).toBe(403);
+    expect((await getTaskRow(taskId))?.status).toBe('pending_review');
+  });
+
+  it('forbids the (non-admin) creator from revoking approval of a done pool task; allows an admin', async () => {
+    const creator = await seedUser('member');
+    const worker = await seedUser('member');
+    const admin = await seedUser('admin');
+    const taskId = await seedTask({
+      createdBy: creator.id,
+      status: 'done',
+      points: 6,
+      deliveredBy: worker.id,
+      deliveredAt: new Date(),
+      completedAt: new Date(),
+      reviewedBy: admin.id,
+    });
+    await seedClaimant(taskId, worker.id, 6);
+
+    const denied = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/revoke-approval`,
+      headers: { cookie: creator.cookie, ...CSRF },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect((await getTaskRow(taskId))?.status).toBe('done');
+
+    const ok = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tasks/${taskId}/revoke-approval`,
+      headers: { cookie: admin.cookie, ...CSRF },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect((await getTaskRow(taskId))?.status).toBe('pending_review');
   });
 
   it('lets a global admin review a pool task they did not create', async () => {
